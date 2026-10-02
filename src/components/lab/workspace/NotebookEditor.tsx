@@ -1,8 +1,10 @@
 "use client";
-import { AlertTriangle, Check, CloudOff, Download, Eraser, History, Loader2, Play, Plus, Redo2, RotateCcw, Undo2 } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, CloudOff, Download, Eraser, History, Loader2, Play, Plus, Redo2, RefreshCw, RotateCcw, Square, Undo2, X } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogClose, DialogContent } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown";
 import { filesApi } from "@/lib/lab/api";
 import { dirOf } from "@/lib/lab/files";
 import { fromNbformat } from "@/lib/lab/notebook";
@@ -12,6 +14,7 @@ import { createNotebookStore, type NotebookStore, type SaveState } from "@/store
 import { CellView } from "./CellView";
 import { HistoryDialog } from "./HistoryDialog";
 import { useNotebookPersistence } from "./useNotebookPersistence";
+import { useNotebookRun } from "./useNotebookRun";
 
 const SAVE_LABEL: Record<SaveState, string> = { saved: "All changes saved", dirty: "Unsaved changes", saving: "Saving…", error: "Couldn’t save. Retrying…", conflict: "Changed elsewhere" };
 
@@ -41,11 +44,20 @@ interface Props {
   opened: OpenedNotebook;
   /** The workspace asks the editor to finish saving before a tab closes. */
   registerFlush: (path: string, flush: (() => Promise<void>) | null) => void;
+  /** Open tabs stay mounted (so runs and unsaved edits survive a tab switch); only the visible one takes keyboard focus. */
+  active: boolean;
 }
 
-export function NotebookEditor({ projectId, opened, registerFlush }: Props) {
+export function NotebookEditor({ projectId, opened, registerFlush, active }: Props) {
   const [store] = useState<NotebookStore>(() => createNotebookStore({ doc: fromNbformat(opened.notebook), notebookId: opened.id, etag: opened.etag, version: opened.version }));
   const { save, reload, flush } = useNotebookPersistence(store, projectId, opened.path);
+  const run = useNotebookRun(store, opened.path);
+  const runStates = useStore(store, (s) => s.run);
+  const lastRuns = useStore(store, (s) => s.lastRun);
+  const kernel = useStore(store, (s) => s.kernel);
+  const runningCount = useStore(store, (s) => Object.values(s.run).reduce((n, r) => n + (r.running ? 1 : 0), 0));
+  const queuedCount = useStore(store, (s) => Object.values(s.run).reduce((n, r) => n + r.queued.length, 0));
+  const [confirmRestart, setConfirmRestart] = useState<"restart" | "restartRun" | null>(null);
   const cells = useStore(store, (s) => s.doc.cells);
   const selected = useStore(store, (s) => s.selected);
   const editing = useStore(store, (s) => s.editing);
@@ -72,16 +84,25 @@ export function NotebookEditor({ projectId, opened, registerFlush }: Props) {
     if (selected) document.getElementById(`cell-${selected}`)?.scrollIntoView({ block: "nearest" });
   }, [selected]);
   useEffect(() => {
-    if (!editing) boxRef.current?.focus({ preventScroll: true });
-  }, [editing, selected]);
+    if (active && !editing) boxRef.current?.focus({ preventScroll: true });
+  }, [editing, selected, active]);
 
-  const shiftEnter = useCallback(() => {
-    const s = store.getState();
-    const i = s.doc.cells.findIndex((c) => c.id === s.selected);
-    // Running cells arrives in the next build step; until then Shift+Enter moves on like Colab does after a run.
-    if (i >= 0 && i < s.doc.cells.length - 1) s.select(s.doc.cells[i + 1]!.id, s.doc.cells[i + 1]!.type === "code");
-    else s.insertCell(s.doc.cells.length, "code");
-  }, [store]);
+  /** Run a cell (code) or finish editing it (text), then stay, move on or add a cell below. */
+  const handleRun = useCallback(
+    (id: string, mode: "next" | "stay" | "insert") => {
+      const s = store.getState();
+      const i = s.doc.cells.findIndex((c) => c.id === id);
+      if (i < 0) return;
+      const cell = s.doc.cells[i]!;
+      if (cell.type === "code") void run.runCells([id]);
+      if (mode === "stay") {
+        if (cell.type !== "code") s.select(id, false);
+      } else if (mode === "insert") s.insertCell(i + 1, "code");
+      else if (i < s.doc.cells.length - 1) s.select(s.doc.cells[i + 1]!.id, s.doc.cells[i + 1]!.type === "code");
+      else s.insertCell(s.doc.cells.length, "code");
+    },
+    [store, run],
+  );
   const escape = useCallback(() => store.getState().setEditing(false), [store]);
   const doSave = useCallback(() => void save(true), [save]);
 
@@ -95,10 +116,10 @@ export function NotebookEditor({ projectId, opened, registerFlush }: Props) {
     if (mod && k.toLowerCase() === "s") return e.preventDefault(), doSave();
     if (mod && k.toLowerCase() === "z") return e.preventDefault(), e.shiftKey ? s.redoStructure() : s.undoStructure();
     if (mod && k.toLowerCase() === "y") return e.preventDefault(), s.redoStructure();
+    if (k === "Enter" && s.selected && (e.shiftKey || mod || e.altKey)) return e.preventDefault(), handleRun(s.selected, e.shiftKey ? "next" : mod ? "stay" : "insert");
     if (mod || e.altKey && !["ArrowUp", "ArrowDown"].includes(k)) return;
     if (e.altKey && k === "ArrowUp" && s.selected) return e.preventDefault(), s.moveCell(s.selected, -1);
     if (e.altKey && k === "ArrowDown" && s.selected) return e.preventDefault(), s.moveCell(s.selected, 1);
-    if (k === "Enter" && e.shiftKey) return e.preventDefault(), shiftEnter();
     if (k === "Enter" && s.selected) return e.preventDefault(), s.select(s.selected, true);
     if (k === "ArrowUp" || k === "k") return e.preventDefault(), s.select(s.doc.cells[Math.max(0, i - 1)]?.id ?? null);
     if (k === "ArrowDown" || k === "j") return e.preventDefault(), s.select(s.doc.cells[Math.min(s.doc.cells.length - 1, i + 1)]?.id ?? null);
@@ -107,6 +128,15 @@ export function NotebookEditor({ projectId, opened, registerFlush }: Props) {
     if (k === "m" && s.selected) return e.preventDefault(), s.changeType(s.selected, "markdown");
     if (k === "y" && s.selected) return e.preventDefault(), s.changeType(s.selected, "code");
     if (k === "z") return e.preventDefault(), s.undoStructure();
+    if (k === "i") {
+      const now = Date.now();
+      e.preventDefault();
+      if (lastKey.current.k === "i" && now - lastKey.current.t < 600) {
+        run.interrupt();
+        lastKey.current = { k: "", t: 0 };
+      } else lastKey.current = { k: "i", t: now };
+      return;
+    }
     if (k === "d" && s.selected) {
       const now = Date.now();
       if (lastKey.current.k === "d" && now - lastKey.current.t < 600) {
@@ -143,9 +173,41 @@ export function NotebookEditor({ projectId, opened, registerFlush }: Props) {
           <Download size={15} />
         </a>
         <span className="mx-1 h-5 w-px bg-border" />
-        <Button size="sm" variant="ghost" disabled title="Running cells arrives in the next build step">
+        <Button size="sm" variant="ghost" onClick={() => void run.runAll()} title="Run every cell from the top">
           <Play size={14} /> Run all
         </Button>
+        {runningCount + queuedCount > 0 && (
+          <Button size="sm" variant="outline" onClick={run.interrupt} title="Stop the running cell (press I twice)">
+            <Square size={12} fill="currentColor" /> Stop
+          </Button>
+        )}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="ghost" aria-label="Runtime menu">
+              Runtime <ChevronDown size={13} />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuItem onSelect={() => void run.runAll()}>Run all</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => selected && void run.runRange(selected, "above")}>Run cells above</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => selected && void run.runRange(selected, "below")}>Run selected cell and below</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={run.interrupt}>Interrupt</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setConfirmRestart("restart")}>Restart kernel…</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setConfirmRestart("restartRun")}>Restart and run all…</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <span className="ml-1 text-xs text-muted" role="status" aria-label="Kernel status">
+          {runningCount + queuedCount > 0
+            ? `${runningCount ? "Running" : "Waiting"}${queuedCount ? ` · ${queuedCount} waiting` : ""}`
+            : kernel === "restarting" || kernel === "starting"
+              ? "Kernel starting…"
+              : kernel === "dead"
+                ? "Kernel stopped"
+                : kernel === "idle"
+                  ? "Kernel ready"
+                  : ""}
+        </span>
         <div className="ml-auto flex items-center gap-3">
           <SaveStatus state={saveState} />
           <Button size="sm" variant="outline" onClick={doSave} disabled={saveState === "saved" || saveState === "saving"} title="Save (Ctrl+S)">
@@ -154,6 +216,23 @@ export function NotebookEditor({ projectId, opened, registerFlush }: Props) {
         </div>
       </div>
 
+      {run.error && (
+        <div role="alert" className="flex items-center gap-3 border-b border-danger/40 bg-danger/10 px-4 py-2 text-sm">
+          <AlertTriangle size={15} className="shrink-0 text-danger" />
+          <span className="flex-1">{run.error}</span>
+          <button aria-label="Dismiss" onClick={run.clearError} className="cursor-pointer rounded p-1 hover:bg-surface-2">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+      {kernel === "dead" && (
+        <div role="alert" className="flex items-center gap-3 border-b border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm">
+          <span className="flex-1">The kernel stopped. Restart it to run cells again.</span>
+          <Button size="sm" variant="outline" onClick={run.restart}>
+            <RefreshCw size={13} /> Restart kernel
+          </Button>
+        </div>
+      )}
       {saveState === "conflict" && (
         <div role="alert" className="flex flex-wrap items-center gap-3 border-b border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm">
           <AlertTriangle size={15} className="shrink-0 text-amber-500" />
@@ -185,7 +264,10 @@ export function NotebookEditor({ projectId, opened, registerFlush }: Props) {
                 liveEditor={mounted.includes(cell.id)}
                 onSelect={act.select}
                 onSource={act.setSource}
-                onShiftEnter={shiftEnter}
+                onRun={handleRun}
+                onInterrupt={run.interrupt}
+                run={runStates[cell.id]}
+                lastRun={lastRuns[cell.id]}
                 onEscape={escape}
                 onSave={doSave}
                 onMove={act.moveCell}
@@ -208,6 +290,27 @@ export function NotebookEditor({ projectId, opened, registerFlush }: Props) {
           <div className="h-40" aria-hidden />
         </div>
       </div>
+
+      <Dialog open={confirmRestart !== null} onOpenChange={(v) => !v && setConfirmRestart(null)}>
+        <DialogContent title={confirmRestart === "restartRun" ? "Restart the kernel and run everything?" : "Restart the kernel?"} description="Variables and imports in this notebook are cleared. Cells that are running stop. Your files and the notebook itself stay.">
+          <div className="flex justify-end gap-2">
+            <DialogClose asChild>
+              <Button variant="ghost">Cancel</Button>
+            </DialogClose>
+            <Button
+              variant="primary"
+              onClick={() => {
+                const mode = confirmRestart;
+                setConfirmRestart(null);
+                if (mode === "restartRun") void run.restartAndRunAll();
+                else run.restart();
+              }}
+            >
+              {confirmRestart === "restartRun" ? "Restart and run all" : "Restart"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <HistoryDialog
         projectId={projectId}

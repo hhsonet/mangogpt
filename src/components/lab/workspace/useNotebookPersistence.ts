@@ -7,6 +7,7 @@ import type { NotebookStore } from "@/stores/notebook";
 
 const AUTOSAVE_MS = 2000;
 const RETRY_MS = 10_000;
+const MAX_WAIT_MS = 10_000; // output streaming from a running cell keeps resetting the 2 s timer; save at least this often anyway
 
 /** Saving, autosave (2 s after the last edit), conflict handling and the "unsaved changes" warning for one open notebook. */
 export function useNotebookPersistence(store: NotebookStore, projectId: string, path: string) {
@@ -33,11 +34,15 @@ export function useNotebookPersistence(store: NotebookStore, projectId: string, 
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let dirtySince = 0;
     const unsub = store.subscribe((s, prev) => {
       const edited = s.rev !== prev.rev || prev.saveState !== s.saveState;
+      if (s.saveState !== "dirty") dirtySince = 0;
       if (s.saveState === "dirty" && edited) {
         clearTimeout(timer);
-        timer = setTimeout(() => void save(), AUTOSAVE_MS);
+        if (!dirtySince) dirtySince = Date.now();
+        const wait = Math.max(0, Math.min(AUTOSAVE_MS, dirtySince + MAX_WAIT_MS - Date.now()));
+        timer = setTimeout(() => void save(), wait);
       } else if (s.saveState === "error" && prev.saveState !== "error") {
         clearTimeout(timer);
         timer = setTimeout(() => {
@@ -49,6 +54,7 @@ export function useNotebookPersistence(store: NotebookStore, projectId: string, 
     return () => {
       clearTimeout(timer);
       unsub();
+      if (store.getState().saveState === "dirty") void save(); // never lose edits because a tab went away
     };
   }, [store, save]);
 

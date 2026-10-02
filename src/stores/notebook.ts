@@ -1,9 +1,23 @@
 import { createStore } from "zustand";
 import { newCell, withType, type Cell, type CellType, type NotebookDoc } from "@/lib/lab/notebook";
+import { mergeOutput, replaceDisplay } from "@/lib/lab/outputs";
+import type { ExecState, KernelState, LabEvent } from "@/lib/lab/types";
 
 export type SaveState = "saved" | "dirty" | "saving" | "error" | "conflict";
 const MAX_UNDO = 50;
 const MAX_MOUNTED_EDITORS = 6; // Monaco instances are heavy: only the most recently used cells keep a live editor
+
+/** Where a cell is in the run queue. Placeholder ids (`local:n`) stand in until the server reports the real message id. */
+export interface RunState {
+  queued: string[];
+  running: string | null;
+}
+export interface LastRun {
+  state: ExecState;
+  ms: number | null;
+}
+const EMPTY_RUN: RunState = { queued: [], running: null };
+let localSeq = 0;
 
 export interface NotebookState {
   doc: NotebookDoc;
@@ -19,7 +33,14 @@ export interface NotebookState {
   savedAt: string | null;
   undo: Cell[][];
   redo: Cell[][];
+  run: Record<string, RunState>;
+  lastRun: Record<string, LastRun>;
+  kernel: KernelState;
   // actions
+  markQueued: (cellIds: string[]) => void;
+  unqueue: (cellId: string) => void;
+  applyEvent: (e: LabEvent) => { ack: string[] } | void;
+  runtimeGone: () => void;
   select: (id: string | null, edit?: boolean) => void;
   setEditing: (v: boolean) => void;
   setSource: (id: string, source: string) => void;
@@ -63,6 +84,119 @@ export function createNotebookStore(init: { doc: NotebookDoc; notebookId: string
       savedAt: null,
       undo: [],
       redo: [],
+      run: {},
+      lastRun: {},
+      kernel: "none",
+
+      markQueued: (ids) =>
+        set((s) => {
+          const run = { ...s.run };
+          for (const id of ids) {
+            const cur = run[id] ?? EMPTY_RUN;
+            run[id] = { ...cur, queued: [...cur.queued, `local:${++localSeq}`] };
+          }
+          return { run };
+        }),
+      unqueue: (id) =>
+        set((s) => {
+          const cur = s.run[id];
+          if (!cur) return s;
+          const i = cur.queued.findIndex((m) => m.startsWith("local:"));
+          return i < 0 ? s : { run: { ...s.run, [id]: { ...cur, queued: cur.queued.filter((_, j) => j !== i) } } };
+        }),
+      runtimeGone: () => set({ run: {}, kernel: "none" }),
+      applyEvent: (e) => {
+        const dirty = (s: NotebookState) => ({ rev: s.rev + 1, saveState: "dirty" as const });
+        const patchCell = (s: NotebookState, id: string, fn: (c: Cell) => Cell): Partial<NotebookState> | null => {
+          const i = s.doc.cells.findIndex((c) => c.id === id);
+          if (i < 0 || s.doc.cells[i]!.type !== "code") return null;
+          const cells = s.doc.cells.slice();
+          cells[i] = fn(cells[i]!);
+          return { doc: { ...s.doc, cells }, ...dirty(s) };
+        };
+        const withRun = (s: NotebookState, id: string, fn: (r: RunState) => RunState) => ({ run: { ...s.run, [id]: fn(s.run[id] ?? EMPTY_RUN) } });
+        switch (e.type) {
+          case "kernel":
+            set({ kernel: e.state });
+            return;
+          case "runtime":
+            if (e.status === "none") get().runtimeGone();
+            return;
+          case "error":
+            if (e.cell_id) get().unqueue(e.cell_id);
+            return;
+          case "snapshot": {
+            set((s) => {
+              let next: Partial<NotebookState> = { kernel: e.kernel };
+              let cur = s;
+              const ids = new Set(e.executions.map((x) => x.msg_id));
+              const run: Record<string, RunState> = {};
+              for (const [cid, r] of Object.entries(s.run)) {
+                // keep placeholders (just requested) and anything the server still knows about; forget the rest (it finished while we were away)
+                run[cid] = { queued: r.queued.filter((m) => m.startsWith("local:") || ids.has(m)), running: r.running && ids.has(r.running) ? r.running : null };
+              }
+              const lastRun = { ...s.lastRun };
+              for (const x of e.executions) {
+                const patch = patchCell(cur, x.cell_id, (c) => ({ ...c, outputs: x.outputs, executionCount: x.execution_count ?? c.executionCount }));
+                if (patch) cur = { ...cur, ...patch };
+                const r = run[x.cell_id] ?? { queued: [], running: null };
+                if (x.state === "queued") run[x.cell_id] = { ...r, queued: r.queued.includes(x.msg_id) ? r.queued : [...r.queued, x.msg_id] };
+                else if (x.state === "running") run[x.cell_id] = { queued: r.queued.filter((m) => m !== x.msg_id), running: x.msg_id };
+                else {
+                  run[x.cell_id] = { queued: r.queued.filter((m) => m !== x.msg_id), running: r.running === x.msg_id ? null : r.running };
+                  lastRun[x.cell_id] = { state: x.state, ms: null };
+                }
+              }
+              next = { ...next, run, lastRun, ...(cur !== s ? { doc: cur.doc, rev: cur.rev, saveState: cur.saveState } : {}) };
+              return next;
+            });
+            return { ack: e.executions.filter((x) => x.state !== "queued" && x.state !== "running").map((x) => x.msg_id) };
+          }
+          case "exec": {
+            const terminal = e.state !== "queued" && e.state !== "running";
+            set((s) => {
+              let patch: Partial<NotebookState> = {};
+              if (e.state === "queued") {
+                patch = withRun(s, e.cell_id, (r) => {
+                  if (r.queued.includes(e.msg_id)) return r;
+                  const i = r.queued.findIndex((m) => m.startsWith("local:"));
+                  return { ...r, queued: i >= 0 ? r.queued.map((m, j) => (j === i ? e.msg_id : m)) : [...r.queued, e.msg_id] };
+                });
+              } else if (e.state === "running") {
+                const first = (s.run[e.cell_id]?.running ?? null) !== e.msg_id;
+                patch = withRun(s, e.cell_id, (r) => ({ queued: r.queued.filter((m) => m !== e.msg_id), running: e.msg_id }));
+                if (first) {
+                  // like Jupyter, the old output goes away when the new run starts
+                  const c = patchCell(s, e.cell_id, (cell) => ({ ...cell, outputs: [], executionCount: e.execution_count ?? null }));
+                  if (c) patch = { ...patch, ...c };
+                  patch = { ...patch, lastRun: Object.fromEntries(Object.entries(s.lastRun).filter(([k]) => k !== e.cell_id)) };
+                } else if (e.execution_count != null) {
+                  const c = patchCell(s, e.cell_id, (cell) => ({ ...cell, executionCount: e.execution_count ?? null }));
+                  if (c) patch = { ...patch, ...c };
+                }
+              } else {
+                patch = withRun(s, e.cell_id, (r) => ({ queued: r.queued.filter((m) => m !== e.msg_id), running: r.running === e.msg_id ? null : r.running }));
+                patch = { ...patch, lastRun: { ...s.lastRun, [e.cell_id]: { state: e.state, ms: e.duration_ms ?? null } } };
+                if (e.execution_count != null) {
+                  const c = patchCell(s, e.cell_id, (cell) => ({ ...cell, executionCount: e.execution_count ?? null }));
+                  if (c) patch = { ...patch, ...c };
+                }
+              }
+              return patch;
+            });
+            return terminal ? { ack: [e.msg_id] } : undefined;
+          }
+          case "output":
+            set((s) => patchCell(s, e.cell_id, (c) => ({ ...c, outputs: mergeOutput(c.outputs, e.output) })) ?? s);
+            return;
+          case "clear_output":
+            set((s) => patchCell(s, e.cell_id, (c) => ({ ...c, outputs: [] })) ?? s);
+            return;
+          case "update_display":
+            set((s) => patchCell(s, e.cell_id, (c) => ({ ...c, outputs: replaceDisplay(c.outputs, e.index, e.data, e.metadata) })) ?? s);
+            return;
+        }
+      },
 
       select: (id, edit = false) => set((s) => ({ selected: id, editing: edit && id !== null, mounted: id ? touch(s.mounted, id) : s.mounted })),
       setEditing: (v) => set({ editing: v }),

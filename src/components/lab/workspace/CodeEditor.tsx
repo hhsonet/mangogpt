@@ -25,19 +25,20 @@ interface Props {
   wordWrap?: boolean;
   readOnly?: boolean;
   onSave?: () => void;
-  onShiftEnter?: () => void;
+  /** Run shortcuts: Shift+Enter (run and move on), Ctrl/Cmd+Enter (run, stay), Alt+Enter (run, add a cell below). */
+  onRun?: (mode: "next" | "stay" | "insert") => void;
   onEscape?: () => void;
 }
 
-export function CodeEditor({ value, language, onChange, focused, mode = "cell", wordWrap, readOnly, onSave, onShiftEnter, onEscape }: Props) {
+export function CodeEditor({ value, language, onChange, focused, mode = "cell", wordWrap, readOnly, onSave, onRun, onEscape }: Props) {
   const { resolvedTheme } = useTheme();
   const [height, setHeight] = useState(48);
   const editorRef = useRef<IEditor | null>(null);
   const wantFocus = useRef(focused);
-  const handlers = useRef({ onSave, onShiftEnter, onEscape });
+  const handlers = useRef({ onSave, onRun, onEscape });
   useEffect(() => {
-    handlers.current = { onSave, onShiftEnter, onEscape }; // Monaco's commands are long-lived: always call the latest callbacks
-  }, [onSave, onShiftEnter, onEscape]);
+    handlers.current = { onSave, onRun, onEscape }; // Monaco's commands are long-lived: always call the latest callbacks
+  }, [onSave, onRun, onEscape]);
   useEffect(() => {
     wantFocus.current = focused;
     if (focused) editorRef.current?.focus();
@@ -54,7 +55,9 @@ export function CodeEditor({ value, language, onChange, focused, mode = "cell", 
       const KM = monaco.KeyMod;
       const KC = monaco.KeyCode;
       editor.addCommand(KM.CtrlCmd | KC.KeyS, () => handlers.current.onSave?.());
-      editor.addCommand(KM.Shift | KC.Enter, () => handlers.current.onShiftEnter?.());
+      editor.addCommand(KM.Shift | KC.Enter, () => handlers.current.onRun?.("next"));
+      editor.addCommand(KM.CtrlCmd | KC.Enter, () => handlers.current.onRun?.("stay"));
+      editor.addCommand(KM.Alt | KC.Enter, () => handlers.current.onRun?.("insert"));
       // Escape leaves edit mode, unless it is needed to close a popup (suggestions, find, hints).
       editor.addCommand(KC.Escape, () => handlers.current.onEscape?.(), "!suggestWidgetVisible && !findWidgetVisible && !parameterHintsVisible && !inSnippetMode && !renameInputVisible");
       if (wantFocus.current) editor.focus();

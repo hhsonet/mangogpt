@@ -22,17 +22,18 @@ function Ansi({ text }: { text: string }) {
 function Pre({ text, tone }: { text: string; tone?: "error" | "stderr" }) {
   const [all, setAll] = useState(false);
   const long = text.length > MAX_CHARS;
-  const shown = all || !long ? text : text.slice(0, MAX_CHARS);
+  // Long output shows its end (what a running job just printed), with the rest one click away.
+  const shown = all || !long ? text : text.slice(text.length - MAX_CHARS);
   return (
     <div className={tone === "error" ? "rounded bg-danger/5 p-2" : tone === "stderr" ? "rounded bg-amber-500/10 p-2" : undefined}>
-      <pre className="m-0 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[0.8rem] leading-relaxed">
-        <Ansi text={shown} />
-      </pre>
       {long && !all && (
-        <button onClick={() => setAll(true)} className="mt-1 cursor-pointer text-xs text-accent hover:underline">
-          Output truncated ({Math.round(text.length / 1000)}k characters). Show everything
+        <button onClick={() => setAll(true)} className="mb-1 cursor-pointer text-xs text-accent hover:underline">
+          Showing the last {Math.round(MAX_CHARS / 1000)}k of {Math.round(text.length / 1000)}k characters. Show everything
         </button>
       )}
+      <pre className="m-0 max-h-[40rem] overflow-auto whitespace-pre-wrap break-words font-mono text-[0.8rem] leading-relaxed">
+        <Ansi text={shown} />
+      </pre>
     </div>
   );
 }

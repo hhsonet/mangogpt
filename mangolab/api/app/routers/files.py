@@ -13,6 +13,7 @@ from app.db import get_db
 from app.deps import LabAccess, User, require_lab
 from app.errors import ApiError
 from app.services import notebooks_io
+from app.services.runtime_manager import manager
 from app.services.projects import ensure_quota, forget_usage, fs_for, get_owned_project, rewrite_notebook_paths
 from app.services.safefs import Entry, FsError, clean_name, clean_path
 
@@ -103,6 +104,7 @@ async def rename(project_id: uuid.UUID, body: RenameBody, lab: tuple[User, LabAc
     src, dst = "/".join(clean_path(body.from_path)), "/".join(clean_path(body.to_path))
     await run_in_threadpool(fs.rename, src, dst)
     await rewrite_notebook_paths(db, p.id, src, dst)
+    await manager.rename_notebook(p.id, src, dst)
     await db.commit()
     return {"path": dst}
 
@@ -113,6 +115,7 @@ async def delete(project_id: uuid.UUID, path: str, lab: tuple[User, LabAccess] =
     target = "/".join(clean_path(path))
     await run_in_threadpool(fs.remove, target)
     await rewrite_notebook_paths(db, p.id, target, None)
+    await manager.forget_notebook(p.id, target)
     await db.commit()
     forget_usage(p.id)
 

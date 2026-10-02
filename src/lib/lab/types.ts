@@ -55,3 +55,41 @@ export interface Revision {
   size: number;
   created_at: string;
 }
+
+export type RuntimeStatus = "none" | "starting" | "running" | "stopping";
+export type KernelState = "none" | "starting" | "idle" | "busy" | "restarting" | "dead";
+export type ExecState = "queued" | "running" | "ok" | "error" | "aborted" | "died";
+
+export interface RuntimeUsage {
+  ram_mb: number | null;
+  gpu_mib: number | null;
+  cpu_pct: number | null;
+}
+
+export interface RuntimeInfo {
+  status: RuntimeStatus;
+  error?: string | null;
+  reason?: string;
+  project_id?: string;
+  project_name?: string;
+  started_at?: string;
+  idle_timeout_min?: number;
+  limits?: { cpu_quota_pct: number; mem_max_mb: number; gpu_budget_mib: number };
+  usage?: RuntimeUsage;
+  kernels?: { path: string; state: KernelState; execution_count: number; running: number }[];
+}
+
+/** What the server sends on the project socket. */
+export type LabEvent =
+  | { type: "hello"; runtime: RuntimeInfo }
+  | ({ type: "runtime" } & RuntimeInfo)
+  | ({ type: "usage" } & RuntimeUsage)
+  | { type: "pong" }
+  | { type: "renamed"; from: string; to: string }
+  | { type: "error"; code: string; message: string; path?: string; cell_id?: string }
+  | { type: "kernel"; path: string; state: KernelState; execution_count: number }
+  | { type: "snapshot"; path: string; kernel: KernelState; execution_count: number; executions: { cell_id: string; msg_id: string; state: ExecState; execution_count: number | null; outputs: NbOutput[] }[] }
+  | { type: "exec"; path: string; cell_id: string; msg_id: string; state: ExecState; execution_count?: number | null; duration_ms?: number }
+  | { type: "output"; path: string; cell_id: string; msg_id: string; output: NbOutput }
+  | { type: "clear_output"; path: string; cell_id: string; msg_id: string }
+  | { type: "update_display"; path: string; cell_id: string; msg_id: string; index: number; data: Record<string, unknown>; metadata: Record<string, unknown> };

@@ -53,4 +53,29 @@ async def set_access(user_id: str, body: AccessUpdate, request: Request, admin: 
     changed = ", ".join(f"{k}={v}" for k, v in body.model_dump().items() if v is not None)
     await log_event(db, type="admin", user_id=admin.id, username=admin.username, ip=request.client.host if request.client else None, detail=f"MangoLab access for {target.username}: {changed}")
     await db.commit()
+    if target.role != "admin" and not merged["enabled"]:
+        from app.services.runtime_manager import manager
+        for rt in manager.for_user(user_id):
+            await manager.stop(rt.project_id, reason="access_removed", actor=admin)
     return {"user_id": user_id, "username": target.username, "lab_enabled": target.role == "admin" or bool(merged["enabled"]), "limits": {k: merged[k] for k in ADMIN_DEFAULTS}}
+
+
+@router.get("/runtimes")
+async def all_runtimes(_: User = Depends(require_admin)) -> dict:
+    from app.services.runtime_manager import manager
+    return {"runtimes": [{**r.view(), "owner": r.owner_name, "owner_id": r.owner_id} for r in manager.runtimes.values()]}
+
+
+@router.delete("/runtimes/{project_id}")
+async def force_stop_runtime(project_id: str, request: Request, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    import uuid as _uuid
+    from app.services.runtime_manager import manager
+    try:
+        pid = _uuid.UUID(project_id)
+    except ValueError:
+        raise ApiError(404, "not_found", "Runtime not found.")
+    rt = manager.get(pid)
+    if not rt:
+        raise ApiError(404, "not_found", "That runtime isn't running.")
+    await manager.stop(pid, reason="admin", actor=admin)
+    return {"status": "none"}

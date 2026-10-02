@@ -26,11 +26,25 @@ function color256(n: number): string | undefined {
 const SGR = /\u001b\[([0-9;]*)m/g;
 const OTHER_ESC = /\u001b\[[0-9;?]*[A-Za-ln-zA-Z]|\u001b\][^\u0007]*\u0007/g; // cursor moves, OSC titles: dropped
 
-/** Apply carriage returns the way a terminal does, so progress bars show their final state instead of every update. */
+/** Apply carriage returns the way a terminal does (a lone \r returns to column 0 and later characters overwrite). Same rule as the server. */
 export function applyCarriageReturns(text: string): string {
+  if (!text.includes("\r")) return text;
   return text
+    .replace(/\r\n/g, "\n")
     .split("\n")
-    .map((line) => (line.includes("\r") ? line.split("\r").filter((s, i, a) => s !== "" || i === a.length - 1).pop() ?? "" : line))
+    .map((line) => {
+      if (!line.includes("\r")) return line;
+      const buf: string[] = [];
+      let col = 0;
+      for (const ch of line) {
+        if (ch === "\r") col = 0;
+        else {
+          buf[col] = ch;
+          col += 1;
+        }
+      }
+      return buf.join("");
+    })
     .join("\n");
 }
 

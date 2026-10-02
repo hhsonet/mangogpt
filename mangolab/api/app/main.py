@@ -9,9 +9,12 @@ from fastapi.responses import JSONResponse
 from app import __version__, db
 from app.config import get_settings
 from app.errors import ApiError, api_error_handler
-from app.routers import admin, files, health, me, notebooks, projects, ws
+from app.routers import admin, files, health, me, notebooks, projects, runtime, ws
+from app.services.runtime_manager import manager
 from app.services.safefs import FsError
 
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger("mangolab").setLevel(logging.INFO)
 log = logging.getLogger("mangolab")
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 
@@ -19,7 +22,13 @@ UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.engine()
+    try:
+        await manager.recover()
+    except Exception:  # noqa: BLE001 - a recovery problem must not keep the API from starting
+        log.exception("could not re-adopt running runtimes")
+    manager.start_loops()
     yield
+    await manager.stop_loops()
     await db.dispose()
 
 
@@ -53,7 +62,7 @@ def create_app() -> FastAPI:
         log.exception("unhandled error", exc_info=exc)
         return JSONResponse({"code": "server_error", "message": "Something went wrong. Please try again."}, status_code=500)
 
-    for r in (health.router, me.router, admin.router, projects.router, files.router, notebooks.router):
+    for r in (health.router, me.router, admin.router, projects.router, files.router, notebooks.router, runtime.router):
         app.include_router(r, prefix=s.api_prefix)
     app.include_router(ws.router)  # WebSocket routes carry their own /lab-ws prefix
     return app

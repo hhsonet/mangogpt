@@ -1,5 +1,5 @@
 import { labApi } from "@/hooks/lab";
-import type { FileEntry, LabProject, NbJson, OpenedNotebook, Revision } from "./types";
+import type { FileEntry, LabProject, NbJson, OpenedNotebook, Revision, RuntimeInfo } from "./types";
 
 const q = (o: Record<string, string | undefined>) => new URLSearchParams(Object.entries(o).filter(([, v]) => v !== undefined) as [string, string][]).toString();
 const base = (id: string) => `/projects/${id}`;
@@ -29,6 +29,13 @@ export const notebooksApi = {
     labApi<{ etag: string; version: number; size: number; saved_at: string }>(`${base(id)}/notebooks`, { method: "PUT", body: JSON.stringify(b) }),
   revisions: (id: string, path: string) => labApi<{ revisions: Revision[] }>(`${base(id)}/notebooks/revisions?${q({ path })}`),
   restore: (id: string, path: string, revision_id: string) => labApi<OpenedNotebook>(`${base(id)}/notebooks/revisions/restore`, { method: "POST", body: JSON.stringify({ path, revision_id }) }),
+};
+
+export const runtimeApi = {
+  status: (id: string) => labApi<RuntimeInfo>(`${base(id)}/runtime`),
+  start: (id: string) => labApi<RuntimeInfo>(`${base(id)}/runtime`, { method: "POST" }),
+  stop: (id: string) => labApi<RuntimeInfo>(`${base(id)}/runtime`, { method: "DELETE" }),
+  mine: () => labApi<{ runtimes: RuntimeInfo[] }>("/runtimes"),
 };
 
 export interface UploadResult {

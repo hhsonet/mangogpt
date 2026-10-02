@@ -14,6 +14,7 @@ from app.deps import LabAccess, User, require_lab
 from app.errors import ApiError
 from app.models import Project
 from app.services import notebooks_io
+from app.services.runtime_manager import manager
 from app.services.projects import MAX_PROJECTS_PER_USER, forget_usage, get_owned_project, fs_for, projects_root, project_usage, slugify, workspace_dir
 from app.services.safefs import SafeFS
 from app.usage import log_event
@@ -118,6 +119,7 @@ async def delete_project(project_id: uuid.UUID, request: Request, lab: tuple[Use
     user, _ = lab
     p = await get_owned_project(db, user, project_id)
     # Phase 2 will stop the project's runtime here first.
+    await manager.stop(p.id, reason="project_deleted", actor=user)  # never leave a runtime running on a deleted workspace
     await run_in_threadpool(SafeFS(projects_root(user.id)).remove, str(p.id))  # removes the folder tree; links inside are deleted, never followed
     await db.delete(p)
     await log_event(db, type="lab", user_id=user.id, username=user.username, detail=f"deleted project “{p.name}”", ip=request.client.host if request.client else None)

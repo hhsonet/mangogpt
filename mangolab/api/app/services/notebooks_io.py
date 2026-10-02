@@ -45,7 +45,7 @@ def welcome_notebook() -> NotebookNode:
         "metadata": {"kernelspec": KERNELSPEC, "language_info": {"name": "python"}},
         "cells": [
             _md("# Welcome to MangoLab\n\nNotebooks on your own GPU. Code cells run in a real Jupyter kernel with **CUDA PyTorch** ready to use.\n\n"
-                "*Running cells arrives in the next build step; for now you can write, organise and save notebooks.*"),
+                "Press **Shift+Enter** in a cell to run it (the first run connects a runtime, which takes a second or two). **Ctrl+Enter** runs without moving on, and **Esc** then **I I** stops a running cell."),
             _code("import torch\n\nprint('PyTorch', torch.__version__)\nprint('CUDA available:', torch.cuda.is_available())\nif torch.cuda.is_available():\n    print(torch.cuda.get_device_name(0))"),
             _md("## A quick plot"),
             _code("import numpy as np\nimport matplotlib.pyplot as plt\n\nx = np.linspace(0, 6, 200)\nplt.plot(x, np.sin(x), label='sin')\nplt.plot(x, np.cos(x), label='cos')\nplt.legend()\nplt.show()"),

@@ -1,10 +1,11 @@
 "use client";
 import hljs from "highlight.js/lib/core";
 import python from "highlight.js/lib/languages/python";
-import { ArrowDown, ArrowUp, Copy, Eraser, Play, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, Clock, Copy, Eraser, Play, Square, Trash2, X } from "lucide-react";
 import { memo } from "react";
 import { cn } from "@/lib/utils/cn";
 import type { Cell, CellType } from "@/lib/lab/notebook";
+import type { LastRun, RunState } from "@/stores/notebook";
 import { CodeEditor } from "./CodeEditor";
 import { LabMarkdown } from "./LabMarkdown";
 import { OutputView } from "./OutputView";
@@ -29,7 +30,10 @@ interface Props {
   liveEditor: boolean;
   onSelect: (id: string, edit?: boolean) => void;
   onSource: (id: string, v: string) => void;
-  onShiftEnter: () => void;
+  onRun: (id: string, mode: "next" | "stay" | "insert") => void;
+  onInterrupt: () => void;
+  run?: RunState;
+  lastRun?: LastRun;
   onEscape: () => void;
   onSave: () => void;
   onMove: (id: string, d: -1 | 1) => void;
@@ -63,6 +67,10 @@ export const CellView = memo(function CellView(p: Props) {
   // Code/raw cells keep a live Monaco while among the most recently used; Markdown cells show it only while being edited.
   const showEditor = cell.type === "markdown" ? p.selected && p.editing : p.liveEditor;
   const editorLang = isCode ? p.language : cell.type === "markdown" ? "markdown" : "plaintext";
+  const running = !!p.run?.running;
+  const queued = !running && !!p.run?.queued.length;
+  const busy = running || queued;
+  const onRun = (mode: "next" | "stay" | "insert") => p.onRun(cell.id, mode);
 
   return (
     <div
@@ -75,14 +83,26 @@ export const CellView = memo(function CellView(p: Props) {
         {isCode ? (
           <>
             <button
-              title="Run cell (available in the next build step)"
-              aria-label="Run cell (not available yet)"
-              disabled
-              className="flex h-8 w-8 items-center justify-center rounded-full border border-border opacity-50"
+              title={busy ? "Stop (interrupt the kernel)" : "Run cell (Shift+Enter)"}
+              aria-label={busy ? "Stop this cell" : "Run cell"}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (busy) p.onInterrupt();
+                else onRun("stay");
+              }}
+              className={cn("relative flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border transition-colors", busy ? "border-accent bg-accent/10 text-accent" : "border-border hover:border-accent hover:text-accent")}
             >
-              <Play size={14} />
+              {running && <span className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-accent" aria-hidden />}
+              {running ? <Square size={11} fill="currentColor" /> : queued ? <Clock size={13} /> : <Play size={14} />}
             </button>
-            <span className="font-mono" aria-label="Execution count">[{cell.executionCount ?? " "}]</span>
+            <span className="font-mono" aria-label="Execution count">[{busy ? "*" : (cell.executionCount ?? " ")}]</span>
+            {p.lastRun && !busy && (
+              <span className={cn("flex items-center gap-0.5 text-[0.65rem]", p.lastRun.state === "ok" ? "text-emerald-600 dark:text-emerald-400" : p.lastRun.state === "aborted" ? "text-muted" : "text-danger")} title={p.lastRun.state === "ok" ? "Finished" : p.lastRun.state === "aborted" ? "Skipped because an earlier cell failed or the kernel restarted" : "Failed"}>
+                {p.lastRun.state === "ok" ? <Check size={10} /> : <X size={10} />}
+                {p.lastRun.state === "aborted" ? "skipped" : p.lastRun.ms != null ? (p.lastRun.ms < 1000 ? `${p.lastRun.ms} ms` : `${(p.lastRun.ms / 1000).toFixed(p.lastRun.ms < 10_000 ? 1 : 0)} s`) : ""}
+              </span>
+            )}
           </>
         ) : (
           <span className="mt-1 rounded border border-border px-1 text-[0.6rem] uppercase tracking-wide">{cell.type === "markdown" ? "text" : "raw"}</span>
@@ -131,7 +151,7 @@ export const CellView = memo(function CellView(p: Props) {
 
         <div className="overflow-hidden rounded-md border border-border bg-[var(--code-bg)]" onDoubleClick={() => !isCode && p.onSelect(cell.id, true)}>
           {showEditor ? (
-            <CodeEditor value={cell.source} language={editorLang} wordWrap={cell.type === "markdown"} focused={p.selected && p.editing} onChange={(v) => p.onSource(cell.id, v)} onSave={p.onSave} onShiftEnter={p.onShiftEnter} onEscape={p.onEscape} />
+            <CodeEditor value={cell.source} language={editorLang} wordWrap={cell.type === "markdown"} focused={p.selected && p.editing} onChange={(v) => p.onSource(cell.id, v)} onSave={p.onSave} onRun={onRun} onEscape={p.onEscape} />
           ) : cell.type === "markdown" ? (
             <div className="cursor-text bg-bg px-4 py-2" onDoubleClick={() => p.onSelect(cell.id, true)}>
               {cell.source.trim() ? <LabMarkdown text={cell.source} projectId={p.projectId} dir={p.dir} /> : <span className="text-sm text-muted">Empty text cell. Double-click to edit.</span>}

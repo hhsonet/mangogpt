@@ -11,6 +11,8 @@ import type { FileEntry, OpenedNotebook } from "@/lib/lab/types";
 import { cn } from "@/lib/utils/cn";
 import { FileTree } from "./FileTree";
 import { NotebookEditor } from "./NotebookEditor";
+import { RuntimeBar, RuntimeNotices } from "./RuntimeBar";
+import { RuntimeProvider } from "./RuntimeContext";
 import { TextFileEditor } from "./TextFileEditor";
 
 type TabKind = "notebook" | "text" | "image" | "binary";
@@ -23,7 +25,7 @@ type Flush = () => Promise<void>;
 
 const kindFor = (name: string, size = 0): TabKind => (isNotebookFile(name) ? "notebook" : isImageFile(name) ? "image" : isProbablyText(name, size) ? "text" : "binary");
 
-function NotebookLoader({ projectId, path, registerFlush, onOpenAsText }: { projectId: string; path: string; registerFlush: (p: string, f: Flush | null) => void; onOpenAsText: (p: string) => void }) {
+function NotebookLoader({ projectId, path, registerFlush, onOpenAsText, active }: { projectId: string; path: string; registerFlush: (p: string, f: Flush | null) => void; onOpenAsText: (p: string) => void; active: boolean }) {
   const [state, setState] = useState<{ opened?: OpenedNotebook; error?: string }>({});
   useEffect(() => {
     let live = true;
@@ -43,7 +45,7 @@ function NotebookLoader({ projectId, path, registerFlush, onOpenAsText }: { proj
       </div>
     );
   if (!state.opened) return <p className="p-6 text-sm text-muted">Opening notebook…</p>;
-  return <NotebookEditor projectId={projectId} opened={state.opened} registerFlush={registerFlush} />;
+  return <NotebookEditor projectId={projectId} opened={state.opened} registerFlush={registerFlush} active={active} />;
 }
 
 function Inner({ projectId }: { projectId: string }) {
@@ -147,13 +149,11 @@ function Inner({ projectId }: { projectId: string }) {
           <span className="ml-1 hidden text-xs text-muted lg:inline" title="Workspace disk used">{humanSize(project.used_bytes)} of {Math.round(project.limits.disk_quota_mb / 1024)} GiB</span>
         )}
         <div className="ml-auto flex items-center gap-1.5">
-          <span title="Running code arrives in the next build step" className="flex items-center gap-2 rounded-full border border-border px-2.5 py-1 text-xs text-muted">
-            <span className="h-2 w-2 rounded-full bg-muted" /> <span className="max-sm:sr-only">Runtime: not connected</span>
-          </span>
-          <Button size="sm" variant="outline" disabled title="Connecting a runtime arrives in the next build step" className="max-sm:hidden">Connect</Button>
+          <RuntimeBar />
           <Button size="icon" variant="ghost" disabled title="MangoLab AI assistant arrives in a later step" aria-label="AI assistant (not available yet)"><Sparkles size={16} /></Button>
         </div>
       </header>
+      <RuntimeNotices />
 
       <div className="flex min-h-0 flex-1">
         {sidebar && <aside className="hidden w-72 shrink-0 border-r border-border bg-surface md:block" aria-label="Project files">{tree}</aside>}
@@ -185,22 +185,27 @@ function Inner({ projectId }: { projectId: string }) {
             </div>
           )}
 
-          <div className="min-h-0 flex-1" role="tabpanel">
-            {activeTab?.kind === "notebook" && <NotebookLoader key={activeTab.path} projectId={projectId} path={activeTab.path} registerFlush={registerFlush} onOpenAsText={(p) => { setTabs((t) => t.map((x) => (x.path === p ? { ...x, kind: "text" } : x))); }} />}
-            {activeTab?.kind === "text" && <TextFileEditor key={activeTab.path} projectId={projectId} path={activeTab.path} registerFlush={registerFlush} />}
-            {activeTab?.kind === "image" && (
-              <div className="flex h-full items-center justify-center overflow-auto bg-surface p-6">
-                {/* eslint-disable-next-line @next/next/no-img-element -- private, authenticated workspace file */}
-                <img src={filesApi.downloadUrl(projectId, activeTab.path, true)} alt={baseOf(activeTab.path)} className="max-h-full max-w-full rounded border border-border bg-white" />
+          <div className="min-h-0 flex-1">
+            {/* Every open notebook and text file stays mounted (hidden when not shown) so runs, undo history and unsaved edits survive a tab switch. */}
+            {tabs.map((t) => (
+              <div key={t.path} hidden={t.path !== active} role="tabpanel" aria-label={baseOf(t.path)} className="h-full">
+                {t.kind === "notebook" && <NotebookLoader projectId={projectId} path={t.path} registerFlush={registerFlush} active={t.path === active} onOpenAsText={(p) => { setTabs((all) => all.map((x) => (x.path === p ? { ...x, kind: "text" } : x))); }} />}
+                {t.kind === "text" && <TextFileEditor projectId={projectId} path={t.path} registerFlush={registerFlush} />}
+                {t.kind === "image" && t.path === active && (
+                  <div className="flex h-full items-center justify-center overflow-auto bg-surface p-6">
+                    {/* eslint-disable-next-line @next/next/no-img-element -- private, authenticated workspace file */}
+                    <img src={filesApi.downloadUrl(projectId, t.path, true)} alt={baseOf(t.path)} className="max-h-full max-w-full rounded border border-border bg-white" />
+                  </div>
+                )}
+                {t.kind === "binary" && t.path === active && (
+                  <div className="mx-auto max-w-sm p-10 text-center">
+                    <p className="mb-1 font-medium">{baseOf(t.path)}</p>
+                    <p className="mb-4 text-sm text-muted">This file can’t be shown here.</p>
+                    <a href={filesApi.downloadUrl(projectId, t.path)} download className="text-sm text-accent underline">Download</a>
+                  </div>
+                )}
               </div>
-            )}
-            {activeTab?.kind === "binary" && (
-              <div className="mx-auto max-w-sm p-10 text-center">
-                <p className="mb-1 font-medium">{baseOf(activeTab.path)}</p>
-                <p className="mb-4 text-sm text-muted">This file can’t be shown here.</p>
-                <a href={filesApi.downloadUrl(projectId, activeTab.path)} download className="text-sm text-accent underline">Download</a>
-              </div>
-            )}
+            ))}
             {!activeTab && (
               <div className="mx-auto flex h-full max-w-md flex-col items-center justify-center gap-3 p-8 text-center">
                 <FlaskConical size={28} className="text-muted" />
@@ -223,5 +228,11 @@ function Inner({ projectId }: { projectId: string }) {
 
 export function Workspace({ projectId }: { projectId: string }) {
   const mounted = useMounted(); // tabs come from localStorage, so render only on the client to avoid a hydration mismatch
-  return mounted ? <Inner projectId={projectId} /> : <div className="h-dvh" />;
+  return mounted ? (
+    <RuntimeProvider projectId={projectId}>
+      <Inner projectId={projectId} />
+    </RuntimeProvider>
+  ) : (
+    <div className="h-dvh" />
+  );
 }

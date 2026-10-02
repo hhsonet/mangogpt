@@ -1,5 +1,5 @@
 "use client";
-import { AlertTriangle, Settings2 } from "lucide-react";
+import { AlertTriangle, Settings2, Square } from "lucide-react";
 import { useState } from "react";
 import useSWR from "swr";
 import { AdminHeader } from "@/components/admin/AdminNav";
@@ -8,6 +8,7 @@ import { Dialog, DialogClose, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { labApi, type LabLimits } from "@/hooks/lab";
 import { cn } from "@/lib/utils/cn";
+import type { RuntimeInfo } from "@/lib/lab/types";
 
 interface LabUser {
   id: string;
@@ -32,6 +33,7 @@ export function LabAdminView() {
   const me = useSWR<{ lab: unknown; user: { role: string } }>("/lab-api/v1/me", (u: string) => fetch(u).then((r) => r.json()));
   const isAdmin = me.data?.user?.role === "admin";
   const users = useSWR<{ users: LabUser[] }>(isAdmin ? "/lab-api/v1/admin/users" : null, () => labApi<{ users: LabUser[] }>("/admin/users"));
+  const runtimes = useSWR<{ runtimes: (RuntimeInfo & { owner: string })[] }>(isAdmin ? "lab-admin-runtimes" : null, () => labApi<{ runtimes: (RuntimeInfo & { owner: string })[] }>("/admin/runtimes"), { refreshInterval: 5000 });
   const [editing, setEditing] = useState<LabUser | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
@@ -73,6 +75,56 @@ export function LabAdminView() {
           </p>
         )}
         {me.data && !isAdmin && <p className="py-12 text-center text-sm text-muted">This page is for admins only.</p>}
+
+        {isAdmin && (
+          <section aria-labelledby="running-h" className="mb-6">
+            <h2 id="running-h" className="mb-2 text-sm font-semibold">Running now</h2>
+            {runtimes.data && runtimes.data.runtimes.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border px-3 py-4 text-sm text-muted">No runtimes are running.</p>
+            ) : (
+              <div className="overflow-hidden rounded-lg border border-border">
+                <table className="w-full text-sm">
+                  <thead className="bg-surface text-left text-xs text-muted">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">Project</th>
+                      <th className="px-3 py-2 font-medium">Owner</th>
+                      <th className="px-3 py-2 font-medium">Use</th>
+                      <th className="w-10 px-2" />
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {runtimes.data?.runtimes.map((r) => (
+                      <tr key={r.project_id}>
+                        <td className="px-3 py-2.5 font-medium">{r.project_name}<span className="ml-2 text-xs font-normal text-muted">{r.status}</span></td>
+                        <td className="px-3 py-2.5">{r.owner}</td>
+                        <td className="px-3 py-2.5 text-xs tabular-nums text-muted">
+                          RAM {r.usage?.ram_mb ?? "–"} MB · GPU {r.usage?.gpu_mib ?? "–"} MiB · {r.kernels?.length ?? 0} kernel{r.kernels?.length === 1 ? "" : "s"}
+                        </td>
+                        <td className="px-2">
+                          <button
+                            aria-label={`Stop the runtime of ${r.owner}: ${r.project_name}`}
+                            title="Stop this runtime"
+                            onClick={async () => {
+                              try {
+                                await labApi(`/admin/runtimes/${r.project_id}`, { method: "DELETE" });
+                              } catch (e) {
+                                setError((e as Error).message);
+                              }
+                              void runtimes.mutate();
+                            }}
+                            className="flex h-7 w-7 cursor-pointer items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-danger"
+                          >
+                            <Square size={13} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        )}
 
         {isAdmin && (
           <div className="overflow-hidden rounded-lg border border-border">
