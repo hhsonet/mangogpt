@@ -1,0 +1,166 @@
+// PostgreSQL. Schema changes go through migrations: `npx prisma migrate dev --name <change>` in development,
+// `npx prisma migrate deploy` in production (see README).
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  email        String?  @unique // required at self sign-up, optional for admin-created accounts
+  passwordHash String
+  role         String   @default("user") // "admin" | "user"
+  status       String   @default("active") // "active" | "pending" | "disabled"
+  createdAt    DateTime @default(now())
+  lastLoginAt  DateTime?
+  conversations Conversation[]
+  projects     Project[]
+  images       Image[]
+  attachments  Attachment[]
+}
+
+// Global, admin-controlled configuration (single row, id = "app").
+model AppConfig {
+  id         String @id @default("app")
+  signupMode String @default("approval") // "closed" | "approval" | "open"
+  imagesEnabled Boolean @default(true)
+}
+
+model Project {
+  id            String         @id @default(cuid())
+  userId        String
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name          String
+  description   String         @default("")
+  systemPrompt  String         @default("")
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  conversations Conversation[]
+  documents     Document[]
+
+  @@index([userId])
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String    @default("New chat")
+  model     String
+  projectId String?
+  project   Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  pinned    Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+  images    Image[]
+  attachments Attachment[]
+
+  @@index([projectId])
+  @@index([userId, updatedAt])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String // "user" | "assistant" | "system"
+  content        String
+  imageId        String? // set on assistant messages that contain a generated image
+  thinking       String? // reasoning text from thinking models, never sent back to the model
+  model          String?
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// Audit and usage trail. Metadata only: message text, prompts and file contents are never stored here.
+model UsageEvent {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  userId    String? // null for events from anonymous visitors (failed logins)
+  username  String? // denormalised so the trail survives user deletion
+  type      String // chat | image | upload | login | login_failed | signup | admin | error
+  status    String   @default("ok") // ok | error | cancelled
+  model     String?
+  tokensIn  Int?
+  tokensOut Int?
+  durationMs Int?
+  bytes     Int?
+  detail    String? // short human-readable note, e.g. "approved carol"
+  ip        String? // auth and admin events only
+
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+}
+
+model Image {
+  id             String       @id @default(cuid())
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  prompt         String
+  size           String // "square" | "portrait" | "landscape"
+  steps          Int
+  seed           Int
+  filepath       String // relative to UPLOAD_DIR
+  createdAt      DateTime     @default(now())
+
+  @@index([userId])
+  @@index([conversationId])
+}
+
+// Files a user attaches to a chat message. Uploaded first (messageId null = pending), linked when the message is sent.
+model Attachment {
+  id             String        @id @default(cuid())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  messageId      String?
+  filename       String // sanitized display name only; never used as a path
+  mimeType       String
+  kind           String // "image" | "text" | "document"
+  size           Int
+  filepath       String // relative to UPLOAD_DIR/files, server-generated
+  extractedText  String?
+  createdAt      DateTime      @default(now())
+
+  @@index([userId])
+  @@index([messageId])
+  @@index([conversationId])
+}
+
+model Document {
+  id            String   @id @default(cuid())
+  projectId     String
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  filename      String
+  filepath      String
+  mimeType      String
+  size          Int
+  extractedText String?
+  createdAt     DateTime @default(now())
+
+  @@index([projectId])
+}
+
+// One row per user, id = User.id.
+model Settings {
+  id           String @id @default("default")
+  defaultModel String @default("")
+  theme        String @default("dark")
+  temperature  Float  @default(0.7)
+  topP         Float  @default(0.9)
+  numCtx       Int    @default(8192)
+  systemPrompt String @default("You are a helpful AI assistant. Answer clearly and concisely. Use Markdown for formatting and fenced code blocks for code.")
+  fontSize     String @default("md")
+  compact      Boolean @default(false)
+}

@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    # Host networking, bound to loopback only. Port 5433 avoids clashing with a PostgreSQL already on 5432.
+    network_mode: host
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "port=5433"]
+    environment:
+      POSTGRES_USER: mangogpt
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: mangogpt
+    volumes:
+      - chat-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5433 -U mangogpt -d mangogpt"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    # Host networking lets the container reach Ollama on the host's 127.0.0.1:11434,
+    # so Ollama never has to listen on a public interface.
+    network_mode: host
+    environment:
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+      DATABASE_URL: postgresql://mangogpt:${POSTGRES_PASSWORD}@127.0.0.1:5433/mangogpt?schema=public&connection_limit=10
+      AUTH_SECRET: ${AUTH_SECRET:-}
+      UPLOAD_DIR: /app/uploads
+      # Bind to loopback only: reach the app through an SSH tunnel.
+      HOSTNAME: 127.0.0.1
+      PORT: ${APP_PORT:-3000}
+    volumes:
+      - chat-uploads:/app/uploads
+
+volumes:
+  chat-db:
+  chat-uploads:
