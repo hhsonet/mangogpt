@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useApp } from "@/hooks/useApp";
 import { useLabMe } from "@/hooks/lab";
 import { cn } from "@/lib/utils/cn";
+import { ProjectsSection } from "./ProjectsSection";
 
 /** Opens the authenticated WebSocket once to prove the whole path (cookie, origin, gateway, framing) works. */
 function useLiveCheck(enabled: boolean) {
@@ -117,7 +118,8 @@ export function LabHome() {
               )}
             </div>
 
-            <h2 className="mb-2 mt-6 text-sm font-semibold">Your resource limits</h2>
+            <ProjectsSection />
+            <h2 className="mb-2 mt-8 text-sm font-semibold">Your resource limits</h2>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               <Limit icon={Zap} label="GPU memory" value={gib(me.lab.limits.gpu_budget_mib)} />
               <Limit icon={Cpu} label="CPU" value={`${(me.lab.limits.cpu_quota_pct / 100).toFixed(1)} cores`} />
@@ -127,13 +129,6 @@ export function LabHome() {
               <Limit icon={Timer} label="Stops after idle" value={`${me.lab.limits.idle_timeout_min} min`} />
             </div>
 
-            <h2 className="mb-2 mt-8 text-sm font-semibold">Projects</h2>
-            <div className="rounded-lg border border-dashed border-border p-8 text-center">
-              <p className="font-medium">Notebooks are coming next</p>
-              <p className="mx-auto mt-1 max-w-md text-sm text-muted">
-                The foundation is in place: sign-in, limits, a live connection to the server and a verified Jupyter + CUDA runtime. Projects, notebooks and the editor arrive in the next build step.
-              </p>
-            </div>
           </>
         )}
       </div>

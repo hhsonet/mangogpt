@@ -27,8 +27,9 @@ function Inner({ children }: { children: React.ReactNode }) {
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  // The login page renders bare: no sidebar, no authenticated data fetching.
-  if (usePathname() === "/login") return <>{children}</>;
+  // The login page and the notebook workspace render full-bleed: no MangoGPT sidebar.
+  const pathname = usePathname();
+  if (pathname === "/login" || pathname.startsWith("/lab/p/")) return <>{children}</>;
   return (
     <AppProvider>
       <Inner>{children}</Inner>

@@ -1,7 +1,7 @@
 # MangoLab
 
 Notebooks on your own GPU, inside MangoGPT: a Colab-style workspace (code and Markdown cells, a terminal, a file browser, GPU monitoring) with an AI assistant.
-**Status: Phase 0 (foundations) is done. Notebooks arrive in Phase 1.** MangoLab does not implement its own Python engine: code runs in real Jupyter kernels.
+**Status: Phases 0 and 1 are done: you can create projects, browse and upload files, and edit notebooks. Running cells arrives in Phase 2.** MangoLab does not implement its own Python engine: code runs in real Jupyter kernels.
 
 ## Architecture
 
@@ -54,11 +54,20 @@ The spike scripts are in `mangolab/scripts/spike_*.py`.
 ## Database
 Schema `mangolab`, managed by Alembic (`mangolab/api/alembic`). MangoGPT's Prisma owns `public` and never sees `mangolab`. Tables: `lab_access`, `projects`, `project_members`, `notebooks`, `notebook_revisions`, `runtimes`, `kernel_sessions`, `executions`, `terminals`, `package_jobs`, `resource_samples`, `ai_threads`, `ai_messages`, `ai_actions`. Foreign keys to `public."User"` cascade, so deleting a user in MangoGPT removes their MangoLab rows (workspace files on disk need a cleanup job, planned).
 
+## Phase 1: what exists
+- **Projects**: up to 50 per user, each a folder under `~/mangolab-data/users/<user-id>/projects/<id>/workspace` (mode 700) with a README and an optional welcome notebook. Open `/lab`, then a project (`/lab/p/<id>`).
+- **Files**: tree, create/rename/move/delete, drag-and-drop upload (50 files, 200 MB each), text editing in Monaco (up to 2 MB), image preview, download. All paths go through `app/services/safefs.py` (descriptor-based traversal, no symlink following, atomic writes, quota). `.mangolab/` is reserved for internal data.
+- **Notebooks**: standard nbformat 4.5 `.ipynb` files, lossless round trip (unknown fields are preserved). Code and Markdown cells, Colab-style shortcuts (Esc/Enter, `a`/`b`, `dd`, `m`/`y`, `z`, Shift+Enter, Ctrl+S), undo of structural edits, autosave after 2 s, a conflict banner when the file changed elsewhere (ETag + `If-Match`, 409), a revision snapshot at most every 5 minutes (30 kept) with restore.
+- **Safety**: notebook HTML outputs render in a sandboxed iframe without `allow-same-origin`; SVG/HTML downloads are forced to attachment with a sandbox CSP; external images in Markdown are blocked.
+- **Not yet**: Run buttons, the runtime pill and the AI button are visible but disabled.
+- **Tests**: `pytest mangolab/api/tests/test_safefs.py` (23 tests), `mangolab/api/tests/integration_phase1.py` (about 85 checks against a running API; needs `LAB_COOKIE_ADMIN`, `LAB_COOKIE_B`, `LAB_USER_B_ID`), plus a Playwright flow for the UI.
+- **Known gap**: deleting a user removes their MangoLab database rows but not their workspace folder (cleanup job planned).
+
 ## Plan
 | Phase | Scope | State |
 |---|---|---|
 | 0 Foundations | Environments, FastAPI skeleton, single sign-on, schema, WebSocket-capable gateway, `/lab` shell, access admin page, risk spike | Done |
-| 1 Notebooks and files | Projects, file browser/upload, create/open/save `.ipynb`, Monaco cells, Markdown cells | Next |
+| 1 Notebooks and files | Projects, file browser/upload, create/open/save `.ipynb`, Monaco cells, Markdown cells | Done |
 | 2 Execution | Runtime start/stop/restart, kernel bridge, streaming output, plots, Run/Run All/Interrupt, reconnect replay | |
 | 3 Workspace tools | Terminal, package install, CPU/RAM/GPU monitoring, idle shutdown, limits enforcement, audit | |
 | 4 Assistant | MangoLab panel with read-only inspection tools, explain/fix/generate/optimize, apply/undo | |

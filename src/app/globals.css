@@ -26,6 +26,8 @@
   --chart-2: #d97706;
   --chart-3: #6366f1;
   --warn: #d97706;
+  --ansi-0:#3b3b3b;--ansi-1:#c5352c;--ansi-2:#1a7f37;--ansi-3:#9a6700;--ansi-4:#1f6feb;--ansi-5:#a626a4;--ansi-6:#0e7c86;--ansi-7:#6b6b6b;
+  --ansi-8:#555;--ansi-9:#e5534b;--ansi-10:#2da44e;--ansi-11:#bf8700;--ansi-12:#388bfd;--ansi-13:#c678dd;--ansi-14:#1b9aaa;--ansi-15:#24292f;
 }
 .dark {
   --bg: #17171a;
@@ -49,6 +51,8 @@
   --chart-2: #fbbf24;
   --chart-3: #818cf8;
   --warn: #fbbf24;
+  --ansi-0:#8b8b8b;--ansi-1:#ff7b72;--ansi-2:#7ee787;--ansi-3:#e3b341;--ansi-4:#79c0ff;--ansi-5:#d2a8ff;--ansi-6:#56d4dd;--ansi-7:#c9d1d9;
+  --ansi-8:#6e7681;--ansi-9:#ffa198;--ansi-10:#56d364;--ansi-11:#f2cc60;--ansi-12:#a5d6ff;--ansi-13:#e2c5ff;--ansi-14:#b3f0ff;--ansi-15:#f0f6fc;
 }
 
 @theme inline {

@@ -9,7 +9,8 @@ from fastapi.responses import JSONResponse
 from app import __version__, db
 from app.config import get_settings
 from app.errors import ApiError, api_error_handler
-from app.routers import admin, health, me, ws
+from app.routers import admin, files, health, me, notebooks, projects, ws
+from app.services.safefs import FsError
 
 log = logging.getLogger("mangolab")
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
@@ -38,6 +39,10 @@ def create_app() -> FastAPI:
 
     app.add_exception_handler(ApiError, api_error_handler)  # type: ignore[arg-type]
 
+    @app.exception_handler(FsError)
+    async def fs_error_handler(_: Request, exc: FsError):
+        return JSONResponse({"code": exc.code, "message": exc.message}, status_code=exc.status)
+
     @app.exception_handler(RequestValidationError)
     async def validation_handler(_: Request, exc: RequestValidationError):
         first = exc.errors()[0] if exc.errors() else {}
@@ -48,7 +53,7 @@ def create_app() -> FastAPI:
         log.exception("unhandled error", exc_info=exc)
         return JSONResponse({"code": "server_error", "message": "Something went wrong. Please try again."}, status_code=500)
 
-    for r in (health.router, me.router, admin.router):
+    for r in (health.router, me.router, admin.router, projects.router, files.router, notebooks.router):
         app.include_router(r, prefix=s.api_prefix)
     app.include_router(ws.router)  # WebSocket routes carry their own /lab-ws prefix
     return app
