@@ -166,6 +166,7 @@ export async function deleteUser(actorId: string, id: string): Promise<void> {
     throw new UserError("At least one active admin is required.", 409);
   }
   await prisma.user.delete({ where: { id } }); // conversations, messages, projects, image rows cascade
+  await prisma.settings.deleteMany({ where: { id } }); // keyed by user id with no foreign key, so remove it explicitly
   await removeUserImageDir(id);
   await removeUserFileDir(id);
 }

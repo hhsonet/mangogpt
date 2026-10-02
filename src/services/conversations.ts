@@ -1,4 +1,5 @@
 import "server-only";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { imageFilesWhere, removeImageFiles } from "@/services/images";
 import { attachmentFilesWhere, attachmentsForConversation, deleteAttachments, removeAttachmentFiles, toAttachmentInfo } from "@/services/attachments";
@@ -28,13 +29,71 @@ export const toMessage = (m: MsgRow): ChatMessage => ({
   createdAt: m.createdAt.toISOString(),
 });
 
+/** Treat %, _ and \\ in the user's text literally (they are wildcards in LIKE patterns). */
+const likePattern = (q: string) => `%${q.replace(/[\\%_]/g, "\\$&")}%`;
+// Terms for which the trigram plan proved slow (very common words), remembered for ten minutes.
+const g = globalThis as unknown as { __mangoSlowTerms?: Map<string, number> };
+const slowTerms = (g.__mangoSlowTerms ??= new Map<string, number>());
+const SLOW_TERM_MS = 10 * 60_000;
+const PLAN_A_LIMIT_MS = 75;
+// Prisma runs queries as reusable prepared statements. After a few runs PostgreSQL may settle on a
+// "generic" plan that cannot see the search word, and for this query that plan scans every message.
+// `plan_cache_mode = force_custom_plan` (set per transaction below) always plans with the real word.
+const isTimeout = (err: unknown) => String((err as Error)?.message ?? err).toLowerCase().includes("statement timeout");
+
+/**
+ * Ids of the user's conversations whose title (or, for 3+ characters, any message) contains `q`.
+ *
+ * Two plans, because "contains" search has two opposite worst cases:
+ *  - A: the trigram index. Instant for rare or absent words, but it slows down when a word appears in
+ *    most messages (it must gather every match from every user), so it gets a very short time limit
+ *    and slow words are remembered so repeats go straight to plan B.
+ *  - B: probe each of the user's conversations and stop at the first hit. Instant for common words,
+ *    slow only for words that appear nowhere, which plan A already answered.
+ */
+async function searchConversationIds(userId: string, q: string, inMessages: boolean): Promise<string[]> {
+  const pattern = likePattern(q);
+  const run = (tx: Prisma.TransactionClient) =>
+    inMessages
+      ? tx.$queryRaw<{ id: string }[]>`
+          SELECT c.id FROM "Conversation" c
+          WHERE c."userId" = ${userId}
+            AND (c.title ILIKE ${pattern} OR EXISTS (SELECT 1 FROM "Message" m WHERE m."conversationId" = c.id AND m.content ILIKE ${pattern}))`
+      : tx.$queryRaw<{ id: string }[]>`SELECT c.id FROM "Conversation" c WHERE c."userId" = ${userId} AND c.title ILIKE ${pattern}`;
+
+  const key = q.toLowerCase();
+  const flaggedAt = slowTerms.get(key);
+  if (inMessages && !(flaggedAt && Date.now() - flaggedAt < SLOW_TERM_MS)) {
+    try {
+      return (
+        await prisma.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${PLAN_A_LIMIT_MS}`);
+          await tx.$executeRaw`SET LOCAL plan_cache_mode = force_custom_plan`;
+          return run(tx);
+        })
+      ).map((r) => r.id);
+    } catch (err) {
+      if (!isTimeout(err)) throw err;
+      if (slowTerms.size > 500) slowTerms.clear();
+      slowTerms.set(key, Date.now());
+    }
+  }
+  return (
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SET LOCAL enable_bitmapscan = off`; // no trigram index here: walk each conversation, stop at the first match
+      await tx.$executeRaw`SET LOCAL plan_cache_mode = force_custom_plan`;
+      return run(tx);
+    })
+  ).map((r) => r.id);
+}
+
 export async function listConversations(userId: string, search?: string): Promise<ConversationSummary[]> {
-  const q = search?.trim();
+  const q = search?.trim().slice(0, 100);
+  // The trigram index needs at least 3 characters. For 1-2 characters only titles are searched, which is
+  // cheap; scanning every message for "a" would be slow and match nearly everything anyway.
+  const ids = q ? await searchConversationIds(userId, q, q.length >= 3) : null;
   const rows = await prisma.conversation.findMany({
-    where: {
-      userId,
-      ...(q ? { OR: [{ title: { contains: q, mode: "insensitive" } }, { messages: { some: { content: { contains: q, mode: "insensitive" } } } }] } : {}),
-    },
+    where: { userId, ...(ids ? { id: { in: ids } } : {}) },
     orderBy: [{ pinned: "desc" }, { updatedAt: "desc" }],
     take: 500,
   });

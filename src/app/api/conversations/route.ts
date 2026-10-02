@@ -8,7 +8,15 @@ export async function GET(req: Request) {
   const a = await authed();
   if (!a.ok) return a.res;
   const q = new URL(req.url).searchParams.get("q") ?? undefined;
-  return json({ conversations: await listConversations(a.user.id, q) });
+  try {
+    return json({ conversations: await listConversations(a.user.id, q) });
+  } catch (err) {
+    // The database cancels queries that run too long (statement_timeout) so one slow search can't hog it.
+    if (String((err as Error)?.message).toLowerCase().includes("statement timeout")) {
+      return json({ code: "search_timeout", message: "That search took too long. Try a more specific word." }, 503);
+    }
+    return errorResponse(err);
+  }
 }
 
 export async function POST(req: Request) {

@@ -12,11 +12,11 @@ export interface CurrentUser {
 
 /** Without AUTH_SECRET the app is single-user (SSH-tunnel mode): everything belongs to a built-in admin. */
 async function localUser(): Promise<CurrentUser> {
-  const u = await prisma.user.upsert({
-    where: { username: "local" },
-    update: {},
-    create: { username: "local", role: "admin", passwordHash: await hashPassword(crypto.randomUUID()) },
-  });
+  let u = await prisma.user.findUnique({ where: { username: "local" } });
+  if (!u) {
+    await prisma.user.createMany({ data: [{ username: "local", role: "admin", passwordHash: await hashPassword(crypto.randomUUID()) }], skipDuplicates: true });
+    u = await prisma.user.findUniqueOrThrow({ where: { username: "local" } });
+  }
   return { id: u.id, username: u.username, role: "admin" };
 }
 

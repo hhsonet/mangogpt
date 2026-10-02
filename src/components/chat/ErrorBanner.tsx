@@ -8,7 +8,7 @@ export function ErrorBanner({ error, onRetry, onDismiss }: { error: ChatError; o
     <div role="alert" className="my-3 flex items-start gap-3 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm">
       <AlertTriangle size={16} className="mt-0.5 shrink-0 text-danger" />
       <div className="flex-1">{error.message}</div>
-      {onRetry && error.code !== "model_missing" && (
+      {onRetry && error.code !== "model_missing" && error.code !== "too_many_requests" && error.code !== "model_no_vision" && error.code !== "attachment_error" && (
         <Button size="sm" variant="outline" onClick={onRetry}>
           <RefreshCw size={13} /> Retry
         </Button>

@@ -2,7 +2,9 @@ import "server-only";
 import { prisma } from "@/lib/db/prisma";
 import type { AppSettings } from "@/types";
 
-function toSettings(row: Awaited<ReturnType<typeof prisma.settings.upsert>>): AppSettings {
+type SettingsRow = NonNullable<Awaited<ReturnType<typeof prisma.settings.findUnique>>>;
+
+function toSettings(row: SettingsRow): AppSettings {
   return {
     defaultModel: row.defaultModel,
     theme: (["dark", "light", "system"].includes(row.theme) ? row.theme : "dark") as AppSettings["theme"],
@@ -15,8 +17,20 @@ function toSettings(row: Awaited<ReturnType<typeof prisma.settings.upsert>>): Ap
   };
 }
 
+/**
+ * Read the user's settings row, creating it on first use. Reads dominate, so look first; the insert is
+ * `ON CONFLICT DO NOTHING`, which makes simultaneous first requests (a new user's page load fires several)
+ * safe. A plain upsert can fail with a unique-key error when two requests race to create the same row.
+ */
+async function ensureSettings(userId: string): Promise<SettingsRow> {
+  const existing = await prisma.settings.findUnique({ where: { id: userId } });
+  if (existing) return existing;
+  await prisma.settings.createMany({ data: [{ id: userId }], skipDuplicates: true });
+  return prisma.settings.findUniqueOrThrow({ where: { id: userId } });
+}
+
 export async function getSettings(userId: string): Promise<AppSettings> {
-  return toSettings(await prisma.settings.upsert({ where: { id: userId }, update: {}, create: { id: userId } }));
+  return toSettings(await ensureSettings(userId));
 }
 
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
@@ -31,5 +45,6 @@ export async function updateSettings(userId: string, patch: Partial<AppSettings>
   if (typeof patch.systemPrompt === "string") data.systemPrompt = patch.systemPrompt.slice(0, 20000);
   if (patch.fontSize && ["sm", "md", "lg"].includes(patch.fontSize)) data.fontSize = patch.fontSize;
   if (typeof patch.compact === "boolean") data.compact = patch.compact;
-  return toSettings(await prisma.settings.upsert({ where: { id: userId }, update: data, create: { id: userId, ...data } }));
+  await ensureSettings(userId);
+  return toSettings(await prisma.settings.update({ where: { id: userId }, data }));
 }

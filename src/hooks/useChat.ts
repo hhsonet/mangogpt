@@ -101,6 +101,10 @@ export function useChat(initialId?: string) {
         });
         if (!res.ok || !res.body) {
           const err = await res.json().catch(() => null);
+          // Refused before anything was saved (limit reached, no vision model, bad attachment): drop the
+          // optimistic message so the screen matches what the server has.
+          if (!convId) setMessages((m) => m.filter((x) => !x.id.startsWith("tmp-")));
+          else setMessages((m) => (m.length && m[m.length - 1]!.id.startsWith("tmp-") ? m.slice(0, -1) : m));
           throw Object.assign(new Error(err?.message ?? `Request failed (${res.status})`), { code: err?.code ?? "generation_failed" });
         }
         const reader = res.body.getReader();

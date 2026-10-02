@@ -1,5 +1,5 @@
 import { generateImage } from "@/lib/images/client";
-import { beginActivity } from "@/lib/monitor/activity";
+import { acquireUserSlot, beginActivity, MAX_PER_USER } from "@/lib/monitor/activity";
 import { logEvent } from "@/services/usage";
 import { unloadAllModels } from "@/lib/ollama/client";
 import { OllamaError } from "@/lib/ollama/errors";
@@ -41,6 +41,11 @@ export async function POST(req: Request) {
     return json({ code: "image_unavailable", message: `You've reached the hourly image limit. Try again in about ${limit.retryAfterMin} min.` }, 429);
   }
 
+  const releaseSlot = acquireUserSlot(a.user.id);
+  if (!releaseSlot) {
+    return json({ code: "too_many_requests", message: `You already have ${MAX_PER_USER} answers or images being generated. Wait for one to finish.` }, 429);
+  }
+
   try {
     const settings = await getSettings(a.user.id);
     let conv = body.conversationId ? await getConversation(a.user.id, body.conversationId) : null;
@@ -79,5 +84,7 @@ export async function POST(req: Request) {
   } catch (err) {
     if (err instanceof OllamaError) return json({ code: err.code, message: err.message }, err.status);
     return errorResponse(err);
+  } finally {
+    releaseSlot();
   }
 }

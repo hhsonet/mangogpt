@@ -71,66 +71,123 @@ export interface UserUsage {
   lastActive: string | null;
 }
 
-export async function usageSummary(range: Range) {
+type Summary = Awaited<ReturnType<typeof computeSummary>>;
+
+// Shared across route bundles. Results are cached briefly and identical in-flight requests are merged,
+// so many admins refreshing at once cost one calculation instead of many.
+const g = globalThis as unknown as { __mangoUsageCache?: { done: Map<Range, { at: number; value: Summary }>; inflight: Map<Range, Promise<Summary>> } };
+const cache = (g.__mangoUsageCache ??= { done: new Map(), inflight: new Map() });
+const CACHE_MS = 15_000;
+
+export async function usageSummary(range: Range): Promise<Summary> {
+  const hit = cache.done.get(range);
+  if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
+  const running = cache.inflight.get(range);
+  if (running) return running;
+  const p = computeSummary(range)
+    .then((value) => {
+      cache.done.set(range, { at: Date.now(), value });
+      return value;
+    })
+    .finally(() => cache.inflight.delete(range));
+  cache.inflight.set(range, p);
+  return p;
+}
+
+interface PerUserRow { userId: string; chats: number; images: number; uploads: number; errors: number; tokensIn: bigint; tokensOut: bigint; durMs: bigint; lastActive: Date | null }
+interface TotalsRow { chats: number; images: number; uploads: number; errors: number; tokensIn: bigint; tokensOut: bigint; active: number }
+interface BucketRow { t: string; chats: number; images: number; tokens: bigint; errors: number }
+interface ModelRow { model: string; requests: number; tokensOut: bigint }
+
+/** All counting and summing happens in PostgreSQL; only the small result set reaches the app. */
+async function computeSummary(range: Range) {
   const since = new Date(Date.now() - RANGE_MS[range]);
-  const [users, events] = await Promise.all([
+  const hourly = range === "24h";
+  const bucketFormat = hourly ? 'YYYY-MM-DD"T"HH24' : "YYYY-MM-DD";
+
+  const [users, perUser, totalsRows, buckets, models] = await Promise.all([
     prisma.user.findMany({ where: { username: { not: "local" } }, select: { id: true, username: true, role: true, status: true, lastLoginAt: true } }),
-    prisma.usageEvent.findMany({ where: { createdAt: { gte: since } }, select: { userId: true, type: true, status: true, model: true, tokensIn: true, tokensOut: true, durationMs: true, createdAt: true }, orderBy: { createdAt: "asc" }, take: 200_000 }),
+    prisma.$queryRaw<PerUserRow[]>`
+      SELECT "userId",
+             (count(*) FILTER (WHERE type = 'chat'))::int AS chats,
+             (count(*) FILTER (WHERE type = 'image'))::int AS images,
+             (count(*) FILTER (WHERE type = 'upload'))::int AS uploads,
+             (count(*) FILTER (WHERE status = 'error'))::int AS errors,
+             coalesce(sum("tokensIn") FILTER (WHERE type = 'chat'), 0)::bigint AS "tokensIn",
+             coalesce(sum("tokensOut") FILTER (WHERE type = 'chat'), 0)::bigint AS "tokensOut",
+             coalesce(sum("durationMs") FILTER (WHERE type IN ('chat', 'image')), 0)::bigint AS "durMs",
+             max("createdAt") FILTER (WHERE type IN ('chat', 'image', 'upload')) AS "lastActive"
+      FROM "UsageEvent"
+      WHERE "createdAt" >= ${since} AND "userId" IS NOT NULL
+      GROUP BY "userId"`,
+    prisma.$queryRaw<TotalsRow[]>`
+      SELECT (count(*) FILTER (WHERE type = 'chat'))::int AS chats,
+             (count(*) FILTER (WHERE type = 'image'))::int AS images,
+             (count(*) FILTER (WHERE type = 'upload'))::int AS uploads,
+             (count(*) FILTER (WHERE status = 'error'))::int AS errors,
+             coalesce(sum("tokensIn") FILTER (WHERE type = 'chat'), 0)::bigint AS "tokensIn",
+             coalesce(sum("tokensOut") FILTER (WHERE type = 'chat'), 0)::bigint AS "tokensOut",
+             (count(DISTINCT "userId") FILTER (WHERE type IN ('chat', 'image', 'upload')))::int AS active
+      FROM "UsageEvent"
+      WHERE "createdAt" >= ${since}`,
+    prisma.$queryRaw<BucketRow[]>`
+      SELECT to_char("createdAt" AT TIME ZONE 'UTC', ${bucketFormat}) AS t,
+             (count(*) FILTER (WHERE type = 'chat'))::int AS chats,
+             (count(*) FILTER (WHERE type = 'image'))::int AS images,
+             coalesce(sum(coalesce("tokensIn", 0) + coalesce("tokensOut", 0)) FILTER (WHERE type = 'chat'), 0)::bigint AS tokens,
+             (count(*) FILTER (WHERE status = 'error'))::int AS errors
+      FROM "UsageEvent"
+      WHERE "createdAt" >= ${since}
+      GROUP BY 1`,
+    prisma.$queryRaw<ModelRow[]>`
+      SELECT model, count(*)::int AS requests, coalesce(sum("tokensOut"), 0)::bigint AS "tokensOut"
+      FROM "UsageEvent"
+      WHERE "createdAt" >= ${since} AND type = 'chat' AND model IS NOT NULL
+      GROUP BY model
+      ORDER BY requests DESC`,
   ]);
 
-  const per = new Map<string, UserUsage>(
-    users.map((u) => [u.id, { userId: u.id, username: u.username, role: u.role, status: u.status, chats: 0, images: 0, uploads: 0, errors: 0, tokensIn: 0, tokensOut: 0, genSeconds: 0, lastActive: u.lastLoginAt?.toISOString() ?? null }]),
-  );
-  const buckets = new Map<string, { t: string; chats: number; images: number; tokens: number; errors: number }>();
-  const models = new Map<string, { model: string; requests: number; tokensOut: number }>();
-  const hourly = range === "24h";
-  const totals = { chats: 0, images: 0, uploads: 0, errors: 0, tokensIn: 0, tokensOut: 0, activeUsers: new Set<string>() };
-
-  for (const e of events) {
-    const key = hourly ? e.createdAt.toISOString().slice(0, 13) : e.createdAt.toISOString().slice(0, 10);
-    const b = buckets.get(key) ?? { t: key, chats: 0, images: 0, tokens: 0, errors: 0 };
-    const u = e.userId ? per.get(e.userId) : undefined;
-    if (e.status === "error") {
-      b.errors++;
-      totals.errors++;
-      if (u) u.errors++;
-    }
-    if (e.type === "chat") {
-      b.chats++; totals.chats++;
-      b.tokens += (e.tokensIn ?? 0) + (e.tokensOut ?? 0);
-      totals.tokensIn += e.tokensIn ?? 0; totals.tokensOut += e.tokensOut ?? 0;
-      if (e.model) {
-        const m = models.get(e.model) ?? { model: e.model, requests: 0, tokensOut: 0 };
-        m.requests++; m.tokensOut += e.tokensOut ?? 0; models.set(e.model, m);
-      }
-      if (u) { u.chats++; u.tokensIn += e.tokensIn ?? 0; u.tokensOut += e.tokensOut ?? 0; u.genSeconds += (e.durationMs ?? 0) / 1000; }
-    } else if (e.type === "image") {
-      b.images++; totals.images++; if (u) { u.images++; u.genSeconds += (e.durationMs ?? 0) / 1000; }
-    } else if (e.type === "upload") {
-      totals.uploads++; if (u) u.uploads++;
-    }
-    if (e.userId && ["chat", "image", "upload"].includes(e.type)) {
-      totals.activeUsers.add(e.userId);
-      if (u && (!u.lastActive || e.createdAt.toISOString() > u.lastActive)) u.lastActive = e.createdAt.toISOString();
-    }
-    buckets.set(key, b);
-  }
+  const stats = new Map(perUser.map((r) => [r.userId, r]));
+  const userRows: UserUsage[] = users
+    .map((u) => {
+      const r = stats.get(u.id);
+      const lastEvent = r?.lastActive ?? null;
+      const last = lastEvent && (!u.lastLoginAt || lastEvent > u.lastLoginAt) ? lastEvent : u.lastLoginAt;
+      return {
+        userId: u.id,
+        username: u.username,
+        role: u.role,
+        status: u.status,
+        chats: r?.chats ?? 0,
+        images: r?.images ?? 0,
+        uploads: r?.uploads ?? 0,
+        errors: r?.errors ?? 0,
+        tokensIn: Number(r?.tokensIn ?? 0),
+        tokensOut: Number(r?.tokensOut ?? 0),
+        genSeconds: Number(r?.durMs ?? 0) / 1000,
+        lastActive: last?.toISOString() ?? null,
+      };
+    })
+    .sort((a, b) => b.tokensOut + b.images * 500 - (a.tokensOut + a.images * 500));
 
   // Fill gaps so charts have a continuous axis.
+  const byKey = new Map(buckets.map((b) => [b.t, b]));
   const series: { t: string; chats: number; images: number; tokens: number; errors: number }[] = [];
   const step = hourly ? 3_600_000 : 86_400_000;
   const end = Date.now();
   for (let t = Math.floor((end - RANGE_MS[range]) / step) * step; t <= end; t += step) {
     const key = new Date(t).toISOString().slice(0, hourly ? 13 : 10);
-    series.push(buckets.get(key) ?? { t: key, chats: 0, images: 0, tokens: 0, errors: 0 });
+    const b = byKey.get(key);
+    series.push(b ? { t: key, chats: b.chats, images: b.images, tokens: Number(b.tokens), errors: b.errors } : { t: key, chats: 0, images: 0, tokens: 0, errors: 0 });
   }
 
+  const t = totalsRows[0];
   return {
     range,
-    totals: { ...totals, activeUsers: totals.activeUsers.size },
-    users: [...per.values()].sort((a, b) => b.tokensOut + b.images * 500 - (a.tokensOut + a.images * 500)),
+    totals: { chats: t?.chats ?? 0, images: t?.images ?? 0, uploads: t?.uploads ?? 0, errors: t?.errors ?? 0, tokensIn: Number(t?.tokensIn ?? 0), tokensOut: Number(t?.tokensOut ?? 0), activeUsers: t?.active ?? 0 },
+    users: userRows,
     series,
-    models: [...models.values()].sort((a, b) => b.requests - a.requests),
+    models: models.map((m) => ({ model: m.model, requests: m.requests, tokensOut: Number(m.tokensOut) })),
   };
 }
 

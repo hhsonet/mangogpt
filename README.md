@@ -84,6 +84,14 @@ Self sign-up requires a university email under `@<subdomain>.uiu.ac.bd` (e.g. `n
 Each user has private conversations and settings; at least one active admin is always kept. Disabling a user locks them out immediately.
 Rename the product with `NEXT_PUBLIC_APP_NAME="Another Name"` in `.env` (rebuild after changing it).
 
+## Performance and fair use
+Load-tested on a 10-core VM with a 16 GiB GPU slice (full results in `docs/load-testing.md`). The web app and database comfortably handle hundreds of simultaneous users; **the GPU is the limit**, so:
+- **Run Ollama with parallel slots.** `scripts/start-ollama.sh` starts Ollama on `127.0.0.1` with `OLLAMA_NUM_PARALLEL=4` (override with the variable). Compared with the default of 1, four people asking at once waited 0.5 s instead of 3.1 s for the first word and finished in 2.7 s instead of 8 s; total throughput rose about 2.7x for about 2.5 GiB more GPU memory. Memory grows with *slots × context length*, so reduce the slots if you raise *Context length* in Settings.
+- **Per-user limit.** Each person can have at most `MAX_CONCURRENT_PER_USER` (default 2) answers or images being generated at once, so one user can't queue enough requests to starve everyone else. Extra requests get a clear message.
+- **Search** uses PostgreSQL trigram indexes (`pg_trgm`, created by a migration). Words of 3+ characters search titles and message text; 1-2 character searches match titles only. `%` and `_` are searched literally.
+- **Query time limit.** The app's database user is capped at 10 seconds per query so one runaway query can't hog the database: `ALTER ROLE mangogpt IN DATABASE mangogpt SET statement_timeout = '10s';`
+- **Admin usage page** is computed inside PostgreSQL and cached for 15 seconds, so many admins refreshing is cheap.
+
 ## Admin: usage, logs and GPU monitor
 Admins get three tabs under **Admin**: *Users*, *Usage & logs* and *GPU monitor*.
 - **Usage & logs** (`/admin/usage`): per-user totals (chats, images, uploads, tokens read/generated, GPU time, errors, last active) over 24 hours, 7 or 30 days, requests and token charts, and a searchable, filterable event log (chat, image, upload, sign-in, failed sign-in, sign-up, admin actions) with CSV export. Click a username to filter the log to that person.
@@ -186,7 +194,7 @@ CREATE DATABASE mangogpt OWNER mangogpt ENCODING 'UTF8';
 ```
 DATABASE_URL=postgresql://mangogpt:…@127.0.0.1:5432/mangogpt?schema=public&connection_limit=10
 ```
-Keep PostgreSQL bound to `127.0.0.1` and start it **before** the app.
+Keep PostgreSQL bound to `127.0.0.1` and start it **before** the app. Search needs the `pg_trgm` extension; the migration creates it (PostgreSQL 13+ lets a database owner do that).
 
 **This server** runs PostgreSQL 16 in user space (no root needed): binaries in `~/.local/pg16`, data in `~/pgdata`, listening on `127.0.0.1:5432`.
 ```bash

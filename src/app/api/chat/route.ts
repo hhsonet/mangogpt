@@ -1,5 +1,5 @@
 import { unloadImageModel } from "@/lib/images/client";
-import { beginActivity, setTokensPerSec } from "@/lib/monitor/activity";
+import { acquireUserSlot, beginActivity, MAX_PER_USER, setTokensPerSec } from "@/lib/monitor/activity";
 import { logEvent } from "@/services/usage";
 import { buildMessages } from "@/lib/chat/context";
 import { AttachmentError } from "@/lib/extract";
@@ -10,6 +10,7 @@ import { getSettings } from "@/services/settings";
 import { attachmentIdsOfMessage, linkAttachments, validatePending } from "@/services/attachments";
 import { prisma } from "@/lib/db/prisma";
 import type { StreamEvent } from "@/types";
+import type { CurrentUser } from "@/lib/auth/current-user";
 import { authed, json, readJson } from "../_lib";
 
 export const dynamic = "force-dynamic";
@@ -37,10 +38,29 @@ const titleFrom = (text: string) => {
 export async function POST(req: Request) {
   const a = await authed();
   if (!a.ok) return a.res;
+
+  // Fair use: the GPU serves a few answers at a time, so each person may have at most MAX_PER_USER in progress.
+  const release = acquireUserSlot(a.user.id);
+  if (!release) {
+    return json({ code: "too_many_requests", message: `You already have ${MAX_PER_USER} answers being generated. Wait for one to finish, or press Stop.` }, 429);
+  }
+  try {
+    const res = await handleChat(req, a.user, release);
+    // A running stream keeps the slot and frees it when it ends; any other response (an error) frees it now.
+    if (!res.headers.get("content-type")?.includes("ndjson")) release();
+    return res;
+  } catch (err) {
+    release();
+    throw err;
+  }
+}
+
+async function handleChat(req: Request, user: CurrentUser, releaseSlot: () => void): Promise<Response> {
   const body = await readJson<ChatRequest>(req);
   if (!body) return json({ code: "bad_request", message: "Invalid request." }, 400);
 
-  const settings = await getSettings(a.user.id);
+
+  const settings = await getSettings(user.id);
   const model = body.model || settings.defaultModel;
   if (!model) return json({ code: "bad_request", message: "No model selected." }, 400);
   if (!body.content?.trim() && !body.truncateFromMessageId) {
@@ -50,7 +70,7 @@ export async function POST(req: Request) {
   // Validate attachments before anything is saved.
   const attachmentIds = Array.isArray(body.attachmentIds) ? body.attachmentIds.filter((x): x is string => typeof x === "string").slice(0, 10) : [];
   try {
-    const pending = await validatePending(a.user.id, attachmentIds);
+    const pending = await validatePending(user.id, attachmentIds);
     if (pending.some((p) => p.kind === "image") && !(await modelSupportsVision(model))) {
       return json({ code: "model_no_vision", message: `${model} can't read images. Switch to a vision model such as gemma4:12b or qwen3.5:9b, or remove the image.` }, 400);
     }
@@ -59,10 +79,10 @@ export async function POST(req: Request) {
     throw err;
   }
 
-  let conv = body.conversationId ? await getConversation(a.user.id, body.conversationId) : null;
+  let conv = body.conversationId ? await getConversation(user.id, body.conversationId) : null;
   if (body.conversationId && !conv) return json({ code: "bad_request", message: "Conversation not found." }, 404);
   if (!conv) {
-    const created = await createConversation(a.user.id, { model, projectId: body.projectId, title: titleFrom(body.content ?? "") });
+    const created = await createConversation(user.id, { model, projectId: body.projectId, title: titleFrom(body.content ?? "") });
     conv = { ...created, messages: [] };
   }
   // Editing a message keeps its attachments and moves them onto the replacement message.
@@ -73,16 +93,16 @@ export async function POST(req: Request) {
   if (body.content?.trim()) {
     userMessageId = (await addMessage({ conversationId: conv.id, role: "user", content: body.content, model })).id;
     if (kept.length) await prisma.attachment.updateMany({ where: { id: { in: kept } }, data: { messageId: userMessageId, conversationId: conv.id } });
-    if (attachmentIds.length) await linkAttachments(a.user.id, attachmentIds, conv.id, userMessageId);
+    if (attachmentIds.length) await linkAttachments(user.id, attachmentIds, conv.id, userMessageId);
   }
-  const history = (await getConversation(a.user.id, conv.id))!.messages;
+  const history = (await getConversation(user.id, conv.id))!.messages;
   if (history.length === 0 || history[history.length - 1]?.role !== "user") {
     return json({ code: "bad_request", message: "Nothing to respond to." }, 400);
   }
 
   const allAttachments = await prisma.attachment.findMany({ where: { conversationId: conv.id, messageId: { not: null } } });
   const { messages, notices } = await buildMessages({
-    userId: a.user.id,
+    userId: user.id,
     history,
     attachments: allAttachments,
     system: settings.systemPrompt,
@@ -145,17 +165,25 @@ export async function POST(req: Request) {
         console.error("[chat]", err);
       }
 
+      // Generation is over: free the user's slot and the activity counter right away, whatever happens next.
+      endActivity();
+      releaseSlot();
+
       // Persist whatever was generated, including partial output after Stop.
       let messageId = "";
-      if (content || thinking) {
-        messageId = (await addMessage({ conversationId: convId, role: "assistant", content, thinking, model })).id;
+      try {
+        if (content || thinking) {
+          messageId = (await addMessage({ conversationId: convId, role: "assistant", content, thinking, model })).id;
+        }
+      } catch (err) {
+        console.error("[chat] could not save the answer", err);
+        failure ??= new OllamaError("generation_failed", "Your answer couldn't be saved. Please try again.");
       }
-      endActivity();
       logEvent({
         type: "chat",
         status: failure ? "error" : abort.signal.aborted ? "cancelled" : "ok",
-        userId: a.user.id,
-        username: a.user.username,
+        userId: user.id,
+        username: user.username,
         model,
         tokensIn: promptTokens || null,
         tokensOut: stats?.tokens ?? null,

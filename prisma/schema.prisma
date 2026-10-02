@@ -63,6 +63,7 @@ model Conversation {
 
   @@index([projectId])
   @@index([userId, updatedAt])
+  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin, map: "Conversation_title_trgm_idx")
 }
 
 model Message {
@@ -77,6 +78,7 @@ model Message {
   createdAt      DateTime     @default(now())
 
   @@index([conversationId, createdAt])
+  @@index([content(ops: raw("gin_trgm_ops"))], type: Gin, map: "Message_content_trgm_idx")
 }
 
 // Audit and usage trail. Metadata only: message text, prompts and file contents are never stored here.
