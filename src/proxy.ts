@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { authEnabled, COOKIE, verifySessionToken } from "@/lib/auth/session";
 
-const PUBLIC = ["/login", "/api/auth/login", "/api/auth/signup", "/api/auth/config"];
+const PUBLIC = ["/login", "/api/auth/login", "/api/auth/signup", "/api/auth/config", "/lab-api/v1/health"];
 
 /** Gate everything behind the session cookie when APP_PASSWORD is set. */
 export async function proxy(req: NextRequest) {
@@ -10,7 +10,7 @@ export async function proxy(req: NextRequest) {
   if (PUBLIC.includes(pathname)) return NextResponse.next();
   if (await verifySessionToken(req.cookies.get(COOKIE)?.value)) return NextResponse.next();
 
-  if (pathname.startsWith("/api/")) {
+  if (pathname.startsWith("/api/") || pathname.startsWith("/lab-api/")) {
     return NextResponse.json({ code: "unauthorized", message: "Please sign in." }, { status: 401 });
   }
   const url = req.nextUrl.clone();

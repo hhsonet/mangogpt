@@ -84,6 +84,9 @@ Self sign-up requires a university email under `@<subdomain>.uiu.ac.bd` (e.g. `n
 Each user has private conversations and settings; at least one active admin is always kept. Disabling a user locks them out immediately.
 Rename the product with `NEXT_PUBLIC_APP_NAME="Another Name"` in `.env` (rebuild after changing it).
 
+## MangoLab (notebooks, beta)
+A Colab-style notebook workspace on the same GPU is being added at `/lab` (see `mangolab/README.md`). Phase 0 is in place: a FastAPI control plane (`mangolab/`), single sign-on with this app, a per-user access switch under **Admin -> MangoLab**, a WebSocket-capable gateway (`scripts/https-proxy.mjs`) and a verified Jupyter + CUDA runtime. **Notebook code runs as the server's Linux user, so only enable it for people you trust.**
+
 ## Performance and fair use
 Load-tested on a 10-core VM with a 16 GiB GPU slice (full results in `docs/load-testing.md`). The web app and database comfortably handle hundreds of simultaneous users; **the GPU is the limit**, so:
 - **Run Ollama with parallel slots.** `scripts/start-ollama.sh` starts Ollama on `127.0.0.1` with `OLLAMA_NUM_PARALLEL=4` (override with the variable). Compared with the default of 1, four people asking at once waited 0.5 s instead of 3.1 s for the first word and finished in 2.7 s instead of 8 s; total throughput rose about 2.7x for about 2.5 GiB more GPU memory. Memory grows with *slots × context length*, so reduce the slots if you raise *Context length* in Settings.

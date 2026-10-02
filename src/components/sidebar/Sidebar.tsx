@@ -1,10 +1,11 @@
 "use client";
-import { LogOut, PanelLeftClose, ShieldCheck, UserRound, Plus, Search, Settings, X } from "lucide-react";
+import { FlaskConical, LogOut, PanelLeftClose, ShieldCheck, UserRound, Plus, Search, Settings, X } from "lucide-react";
 import useSWR from "swr";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { useConversations, useModels, useSettings } from "@/hooks/api";
+import { useLabMe } from "@/hooks/lab";
 import { useApp } from "@/hooks/useApp";
 import { APP_NAME } from "@/lib/brand";
 import { cn } from "@/lib/utils/cn";
@@ -34,6 +35,7 @@ export function Sidebar() {
   const { conversations, error } = useConversations();
   const { settings } = useSettings();
   const { models } = useModels();
+  const { me: labMe } = useLabMe();
   const { data: auth } = useSWR<{ enabled: boolean; username: string | null; role: string | null }>("/api/auth/me", (u: string) => fetch(u).then((r) => r.json()), { revalidateOnFocus: false });
   const { data: pending } = useSWR<{ users: { status: string }[] }>(auth?.role === "admin" ? "/api/admin/users" : null, (u: string) => fetch(u).then((r) => r.json()), { refreshInterval: 30000 });
   const pendingCount = pending?.users?.filter((u) => u.status === "pending").length ?? 0;
@@ -103,6 +105,12 @@ export function Sidebar() {
                 <LogOut size={14} />
               </Button>
             </div>
+          )}
+          {labMe?.lab.enabled && (
+            <Link href="/lab" onClick={() => setMobileOpen(false)} className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-sm hover:bg-surface-2">
+              <FlaskConical size={15} className="text-muted" /> MangoLab
+              <span className="ml-auto rounded border border-border px-1 text-[0.6rem] uppercase tracking-wide text-muted">beta</span>
+            </Link>
           )}
           {auth?.role === "admin" && auth.enabled && (
             <Link href="/admin" onClick={() => setMobileOpen(false)} className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-sm hover:bg-surface-2">

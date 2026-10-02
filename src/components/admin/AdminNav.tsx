@@ -1,5 +1,5 @@
 "use client";
-import { Activity, ArrowLeft, Cpu, Menu, Users } from "lucide-react";
+import { Activity, ArrowLeft, Cpu, FlaskConical, Menu, Users } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ const TABS = [
   { href: "/admin", label: "Users", icon: Users },
   { href: "/admin/usage", label: "Usage & logs", icon: Activity },
   { href: "/admin/gpu", label: "GPU monitor", icon: Cpu },
+  { href: "/admin/lab", label: "MangoLab", icon: FlaskConical },
 ];
 
 export function AdminHeader() {

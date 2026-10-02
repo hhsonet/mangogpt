@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy[asyncio]>=2
+psycopg[binary,pool]
+alembic
+pydantic>=2
+pydantic-settings
+httpx
+websockets
+nbformat
+python-multipart
+pytest
+pytest-asyncio

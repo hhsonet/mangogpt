@@ -1,0 +1,16 @@
+# Notebook kernel environment ("base"). Users add more with pip into their project overlay.
+ipykernel
+ipython
+jupyter_kernel_gateway
+nbformat
+numpy
+pandas
+scipy
+scikit-learn
+matplotlib
+seaborn
+plotly
+tqdm
+transformers
+accelerate
+safetensors
