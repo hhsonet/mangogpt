@@ -71,7 +71,7 @@ async def main():
         print("== path attacks")
         for bad in ["../../../etc/passwd", "/etc/passwd", "a/../../b", "..", ".mangolab/revisions", "a\\b", "x" * 300, "a/\x00b"]:
             r = await a.get(f"/projects/{pid}/files/content", params={"path": bad}); ok(r.status_code in (400, 404, 422) and "root:" not in r.text, f"path {bad[:24]!r:30} -> {r.status_code}")
-        decoy = "/tmp/claude-1000/decoy-secret.txt"; outside = "/tmp/claude-1000/outside-dir"; os.makedirs(outside, exist_ok=True); open(decoy, "w").write("SECRET-DECOY"); open(f"{outside}/loot.txt", "w").write("LOOT")
+        decoy = "/tmp/mangolab-test/decoy-secret.txt"; outside = "/tmp/mangolab-test/outside-dir"; os.makedirs(outside, exist_ok=True); open(decoy, "w").write("SECRET-DECOY"); open(f"{outside}/loot.txt", "w").write("LOOT")
         os.symlink(decoy, f"{ws}/trojan.txt"); os.symlink(outside, f"{ws}/portal")   # what a malicious notebook could do
         ok(any(x["name"] == "trojan.txt" and x["kind"] == "link" for x in (await a.get(f"/projects/{pid}/files")).json()["entries"]), "links are listed as links")
         for label, r in (("read through a file link", await a.get(f"/projects/{pid}/files/content", params={"path": "trojan.txt"})),

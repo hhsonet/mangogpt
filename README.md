@@ -2,7 +2,7 @@
 
 A private, self-hosted AI workspace that runs on your own GPU. It has two parts that share one login, one database server and one GPU:
 
-- **MangoGPT**: a ChatGPT/Claude-style chat app on [Ollama](https://ollama.com): streaming chat, attachments, image generation, accounts, an admin area.
+- **MangoGPT**: a ChatGPT-style chat app on [Ollama](https://ollama.com): streaming chat, attachments, image generation, accounts, an admin area.
 - **MangoLab** (`/lab`): a Colab-style notebook workspace: projects and files, notebooks that run on the GPU, a terminal, package installs, live resource monitoring, and an AI assistant that can explain, fix and write notebook code.
 
 ```
