@@ -10,6 +10,8 @@ import { baseOf, humanSize, isImageFile, isNotebookFile, isProbablyText } from "
 import type { FileEntry, OpenedNotebook } from "@/lib/lab/types";
 import { cn } from "@/lib/utils/cn";
 import { FileTree } from "./FileTree";
+import { AssistantBridgeProvider } from "./AssistantBridge";
+import { AssistantPanel, type AskRequest } from "./AssistantPanel";
 import { BottomPanel, type PanelTab } from "./BottomPanel";
 import { NotebookEditor } from "./NotebookEditor";
 import { RuntimeBar, RuntimeNotices } from "./RuntimeBar";
@@ -26,7 +28,7 @@ type Flush = () => Promise<void>;
 
 const kindFor = (name: string, size = 0): TabKind => (isNotebookFile(name) ? "notebook" : isImageFile(name) ? "image" : isProbablyText(name, size) ? "text" : "binary");
 
-function NotebookLoader({ projectId, path, registerFlush, onOpenAsText, active }: { projectId: string; path: string; registerFlush: (p: string, f: Flush | null) => void; onOpenAsText: (p: string) => void; active: boolean }) {
+function NotebookLoader({ projectId, path, registerFlush, onOpenAsText, active, onAskAI }: { projectId: string; path: string; registerFlush: (p: string, f: Flush | null) => void; onOpenAsText: (p: string) => void; active: boolean; onAskAI: (path: string, cellId: string, mode: "explain" | "fix") => void }) {
   const [state, setState] = useState<{ opened?: OpenedNotebook; error?: string }>({});
   useEffect(() => {
     let live = true;
@@ -46,7 +48,7 @@ function NotebookLoader({ projectId, path, registerFlush, onOpenAsText, active }
       </div>
     );
   if (!state.opened) return <p className="p-6 text-sm text-muted">Opening notebook…</p>;
-  return <NotebookEditor projectId={projectId} opened={state.opened} registerFlush={registerFlush} active={active} />;
+  return <NotebookEditor projectId={projectId} opened={state.opened} registerFlush={registerFlush} active={active} onAskAI={onAskAI} />;
 }
 
 function Inner({ projectId }: { projectId: string }) {
@@ -71,6 +73,12 @@ function Inner({ projectId }: { projectId: string }) {
     }
   });
   const [sidebar, setSidebar] = useState(true);
+  const [assistant, setAssistant] = useState<{ open: boolean; used: boolean }>({ open: false, used: false });
+  const [ask, setAsk] = useState<AskRequest | null>(null);
+  const askAI = useCallback((path: string, cellId: string, mode: "explain" | "fix") => {
+    setAssistant({ open: true, used: true });
+    setAsk((a) => ({ path, cellId, mode, nonce: (a?.nonce ?? 0) + 1 }));
+  }, []);
   const [panel, setPanel] = useState<{ open: boolean; tab: PanelTab; height: number }>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem("lab-panel") ?? "{}") as Partial<{ open: boolean; tab: PanelTab; height: number }>;
@@ -108,6 +116,7 @@ function Inner({ projectId }: { projectId: string }) {
   const registerFlush = useCallback((path: string, f: Flush | null) => void (f ? flushers.current.set(path, f) : flushers.current.delete(path)), []);
 
   const activeTab = tabs.find((t) => t.path === active) ?? null;
+  const activeNotebook = activeTab?.kind === "notebook" ? activeTab.path : null;
 
   useEffect(() => {
     try {
@@ -185,7 +194,7 @@ function Inner({ projectId }: { projectId: string }) {
           <Button size="icon" variant="ghost" aria-label="Terminal" aria-pressed={panel.open && panel.tab === "terminal"} title="Terminal" onClick={() => openPanel("terminal")} className={cn(panel.open && panel.tab === "terminal" && "bg-surface-2")}><TerminalSquare size={16} /></Button>
           <Button size="icon" variant="ghost" aria-label="Packages" aria-pressed={panel.open && panel.tab === "packages"} title="Packages" onClick={() => openPanel("packages")} className={cn(panel.open && panel.tab === "packages" && "bg-surface-2")}><Package size={16} /></Button>
           <RuntimeBar />
-          <Button size="icon" variant="ghost" disabled title="MangoLab AI assistant arrives in a later step" aria-label="AI assistant (not available yet)"><Sparkles size={16} /></Button>
+          <Button size="icon" variant="ghost" title="MangoLab AI assistant" aria-label="AI assistant" aria-pressed={assistant.open} onClick={() => setAssistant((a) => ({ open: !a.open, used: true }))} className={cn(assistant.open && "bg-surface-2")}><Sparkles size={16} className="text-accent" /></Button>
         </div>
       </header>
       <RuntimeNotices />
@@ -224,7 +233,7 @@ function Inner({ projectId }: { projectId: string }) {
             {/* Every open notebook and text file stays mounted (hidden when not shown) so runs, undo history and unsaved edits survive a tab switch. */}
             {tabs.map((t) => (
               <div key={t.path} hidden={t.path !== active} role="tabpanel" aria-label={baseOf(t.path)} className="h-full">
-                {t.kind === "notebook" && <NotebookLoader projectId={projectId} path={t.path} registerFlush={registerFlush} active={t.path === active} onOpenAsText={(p) => { setTabs((all) => all.map((x) => (x.path === p ? { ...x, kind: "text" } : x))); }} />}
+                {t.kind === "notebook" && <NotebookLoader projectId={projectId} path={t.path} registerFlush={registerFlush} active={t.path === active} onAskAI={askAI} onOpenAsText={(p) => { setTabs((all) => all.map((x) => (x.path === p ? { ...x, kind: "text" } : x))); }} />}
                 {t.kind === "text" && <TextFileEditor projectId={projectId} path={t.path} registerFlush={registerFlush} />}
                 {t.kind === "image" && t.path === active && (
                   <div className="flex h-full items-center justify-center overflow-auto bg-surface p-6">
@@ -268,6 +277,12 @@ function Inner({ projectId }: { projectId: string }) {
             </div>
           )}
         </main>
+
+        {assistant.used && (
+          <aside hidden={!assistant.open} aria-label="Assistant" className="fixed inset-0 z-40 bg-bg md:static md:inset-auto md:z-auto md:w-[26rem] md:shrink-0 md:border-l md:border-border">
+            <AssistantPanel projectId={projectId} path={activeNotebook} ask={ask} onClose={() => setAssistant((a) => ({ ...a, open: false }))} onOpenPackages={() => { setPanelUsed(true); setPanel((p) => ({ ...p, open: true, tab: "packages" })); }} />
+          </aside>
+        )}
       </div>
     </div>
   );
@@ -277,7 +292,9 @@ export function Workspace({ projectId }: { projectId: string }) {
   const mounted = useMounted(); // tabs come from localStorage, so render only on the client to avoid a hydration mismatch
   return mounted ? (
     <RuntimeProvider projectId={projectId}>
-      <Inner projectId={projectId} />
+      <AssistantBridgeProvider>
+        <Inner projectId={projectId} />
+      </AssistantBridgeProvider>
     </RuntimeProvider>
   ) : (
     <div className="h-dvh" />

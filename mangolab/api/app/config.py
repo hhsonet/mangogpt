@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     ollama_base_url: str = Field(default="http://127.0.0.1:11434", alias="OLLAMA_BASE_URL")
     session_cookie: str = "oc_session"  # same cookie the MangoGPT app sets
     api_prefix: str = "/lab-api/v1"
+    assistant_enabled: bool = Field(default=True, alias="MANGOLAB_ASSISTANT")
+    assistant_model: str = Field(default="", alias="MANGOLAB_ASSISTANT_MODEL")          # empty: the first installed model that supports tools
+    assistant_num_ctx: int = Field(default=8192, alias="MANGOLAB_ASSISTANT_NUM_CTX")    # context window per request (it costs GPU memory)
+    assistant_max_concurrent: int = Field(default=3, alias="MANGOLAB_ASSISTANT_CONCURRENCY")
     max_total_runtimes: int = Field(default=6, alias="MANGOLAB_MAX_RUNTIMES")  # across all users: the GPU and RAM are shared
     runtime_start_timeout_s: int = 60
     sample_interval_s: int = 5

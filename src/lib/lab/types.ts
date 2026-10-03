@@ -130,3 +130,65 @@ export type LabEvent =
   | { type: "output"; path: string; cell_id: string; msg_id: string; output: NbOutput }
   | { type: "clear_output"; path: string; cell_id: string; msg_id: string }
   | { type: "update_display"; path: string; cell_id: string; msg_id: string; index: number; data: Record<string, unknown>; metadata: Record<string, unknown> };
+
+// ---------------------------------------------------------------- assistant
+export interface AssistantModel {
+  name: string;
+  size_gb: number;
+  tools: boolean;
+  thinking: boolean;
+  vision: boolean;
+}
+
+export type AssistantMode = "chat" | "explain" | "fix" | "optimize" | "generate";
+
+export type AssistantAction =
+  | { id: string; type: "edit_cell"; status: ActionStatus; payload: { cell_id: string; cell_number: number; old_source: string; source: string; applied_prev?: string } }
+  | { id: string; type: "insert_cell"; status: ActionStatus; payload: { position: "after" | "before" | "end"; ref_cell_id: string | null; ref_cell_number: number | null; cell_type: "code" | "markdown"; source: string; applied_prev?: string } }
+  | { id: string; type: "run_cell"; status: ActionStatus; payload: { cell_id: string; cell_number: number } }
+  | { id: string; type: "install_packages"; status: ActionStatus; payload: { specs: string[] } };
+export type ActionStatus = "proposed" | "applied" | "rejected";
+
+export interface ToolChip {
+  id: string;
+  name: string;
+  status: "running" | "done" | "error";
+  summary: string;
+}
+
+export interface AssistantMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  thinking?: string;
+  tools: ToolChip[];
+  actions: AssistantAction[];
+  model?: string;
+  streaming?: boolean;
+  error?: string;
+  /** Set when the answer was cut because the notebook was too big to show in full. */
+  trimmed?: boolean;
+}
+
+export interface AssistantThread {
+  id: string;
+  title: string;
+  last_at: string;
+}
+
+/** What the browser tells the server about the open notebook (including edits that are not saved yet). */
+export interface NotebookSnapshot {
+  path: string;
+  selected: string | null;
+  kernel: string | null;
+  cells: { id: string; type: "code" | "markdown" | "raw"; source: string; output: string; execution_count: number | null; state: "idle" | "queued" | "running"; failed: boolean }[];
+}
+
+export type AssistantEvent =
+  | { type: "meta"; thread_id: string; user_message_id: string; assistant_message_id: string; model: string; title: string; tools: boolean; trimmed: boolean }
+  | { type: "thinking"; delta: string }
+  | { type: "content"; delta: string }
+  | { type: "tool"; id: string; name: string; status: "running" | "done" | "error"; summary: string }
+  | { type: "action"; action: AssistantAction }
+  | { type: "done"; stats: { tokens_in: number; tokens_out: number; ms: number } }
+  | { type: "error"; code: string; message: string };

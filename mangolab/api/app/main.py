@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from app import __version__, db
 from app.config import get_settings
 from app.errors import ApiError, api_error_handler
-from app.routers import admin, files, health, me, notebooks, packages, projects, runtime, terminals, ws
+from app.routers import admin, assistant, files, health, me, notebooks, packages, projects, runtime, terminals, ws
 from app.services.runtime_manager import manager
 from app.services.safefs import FsError
 
@@ -62,7 +62,7 @@ def create_app() -> FastAPI:
         log.exception("unhandled error", exc_info=exc)
         return JSONResponse({"code": "server_error", "message": "Something went wrong. Please try again."}, status_code=500)
 
-    for r in (health.router, me.router, admin.router, projects.router, files.router, notebooks.router, runtime.router, packages.router, terminals.router):
+    for r in (health.router, me.router, admin.router, projects.router, files.router, notebooks.router, runtime.router, packages.router, terminals.router, assistant.router):
         app.include_router(r, prefix=s.api_prefix)
     app.include_router(ws.router)  # WebSocket routes carry their own /lab-ws prefix
     return app

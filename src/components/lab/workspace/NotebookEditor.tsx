@@ -7,10 +7,11 @@ import { Dialog, DialogClose, DialogContent } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown";
 import { filesApi } from "@/lib/lab/api";
 import { dirOf } from "@/lib/lab/files";
-import { fromNbformat } from "@/lib/lab/notebook";
+import { fromNbformat, outputsAsText } from "@/lib/lab/notebook";
 import type { OpenedNotebook } from "@/lib/lab/types";
 import { cn } from "@/lib/utils/cn";
 import { createNotebookStore, type NotebookStore, type SaveState } from "@/stores/notebook";
+import { useBridgeRegistry } from "./AssistantBridge";
 import { CellView } from "./CellView";
 import { HistoryDialog } from "./HistoryDialog";
 import { useNotebookPersistence } from "./useNotebookPersistence";
@@ -46,9 +47,11 @@ interface Props {
   registerFlush: (path: string, flush: (() => Promise<void>) | null) => void;
   /** Open tabs stay mounted (so runs and unsaved edits survive a tab switch); only the visible one takes keyboard focus. */
   active: boolean;
+  /** Opens the assistant on a cell ("Fix with AI", "Explain with AI"). */
+  onAskAI?: (path: string, cellId: string, mode: "explain" | "fix") => void;
 }
 
-export function NotebookEditor({ projectId, opened, registerFlush, active }: Props) {
+export function NotebookEditor({ projectId, opened, registerFlush, active, onAskAI }: Props) {
   const [store] = useState<NotebookStore>(() => createNotebookStore({ doc: fromNbformat(opened.notebook), notebookId: opened.id, etag: opened.etag, version: opened.version }));
   const { save, reload, flush } = useNotebookPersistence(store, projectId, opened.path);
   const run = useNotebookRun(store, opened.path);
@@ -73,6 +76,54 @@ export function NotebookEditor({ projectId, opened, registerFlush, active }: Pro
   const act = store.getState();
   const dir = dirOf(opened.path);
   const language = useMemo(() => ((meta.language_info as { name?: string } | undefined)?.name ?? (meta.kernelspec as { language?: string } | undefined)?.language ?? "python"), [meta]);
+
+  // Let the assistant read this notebook (including unsaved edits) and, when the person approves, change it.
+  const registry = useBridgeRegistry();
+  useEffect(() => {
+    registry.register(opened.path, {
+      subscribe: (cb) => store.subscribe(cb),
+      version: () => {
+        const s = store.getState();
+        return `${s.selected}:${s.rev}:${s.kernel}`;
+      },
+      snapshot: () => {
+        const s = store.getState();
+        return {
+          path: opened.path,
+          selected: s.selected,
+          kernel: s.kernel,
+          cells: s.doc.cells.map((c) => ({
+            id: c.id,
+            type: c.type,
+            source: c.source,
+            output: c.type === "code" ? outputsAsText(c.outputs) : "",
+            execution_count: c.executionCount,
+            state: s.run[c.id]?.running ? "running" : s.run[c.id]?.queued.length ? "queued" : "idle",
+            failed: c.type === "code" && c.outputs.some((o) => o.output_type === "error"),
+          })),
+        };
+      },
+      selectedCellId: () => store.getState().selected,
+      cellSource: (id) => store.getState().doc.cells.find((c) => c.id === id)?.source ?? null,
+      editCell: (id, source) => {
+        if (!store.getState().doc.cells.some((c) => c.id === id)) return false;
+        store.getState().setSource(id, source);
+        return true;
+      },
+      insertCell: ({ position, refCellId, type, source }) => {
+        const s = store.getState();
+        const i = refCellId ? s.doc.cells.findIndex((c) => c.id === refCellId) : -1;
+        const index = position === "end" || i < 0 ? s.doc.cells.length : position === "after" ? i + 1 : i;
+        const id = s.insertCell(index, type, source);
+        store.getState().select(id, false); // select it, but leave the keyboard where it was
+        return id;
+      },
+      removeCell: (id) => store.getState().deleteCell(id),
+      runCell: (id) => void run.runCells([id]),
+      selectCell: (id) => store.getState().select(id, false),
+    });
+    return () => registry.register(opened.path, null);
+  }, [registry, opened.path, store, run]);
 
   useEffect(() => {
     registerFlush(opened.path, flush);
@@ -266,6 +317,7 @@ export function NotebookEditor({ projectId, opened, registerFlush, active }: Pro
                 onSource={act.setSource}
                 onRun={handleRun}
                 onInterrupt={run.interrupt}
+                onAskAI={onAskAI ? (id, mode) => onAskAI(opened.path, id, mode) : undefined}
                 run={runStates[cell.id]}
                 lastRun={lastRuns[cell.id]}
                 onEscape={escape}

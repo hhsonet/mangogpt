@@ -67,3 +67,21 @@ export function withType(cell: Cell, type: CellType): Cell {
 
 /** Text of an output field that nbformat allows as a string or an array of lines. */
 export const textOf = (v: unknown): string => (Array.isArray(v) ? v.join("") : typeof v === "string" ? v : v == null ? "" : JSON.stringify(v, null, 2));
+
+const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/g;
+
+/** The outputs of a cell as plain text for the assistant: streams, tracebacks and text results; images and rich HTML are only noted. */
+export function outputsAsText(outputs: NbOutput[]): string {
+  const parts: string[] = [];
+  for (const o of outputs) {
+    if (o.output_type === "stream") parts.push(textOf(o.text));
+    else if (o.output_type === "error") parts.push(Array.isArray(o.traceback) && o.traceback.length ? o.traceback.join("\n") : `${textOf(o.ename)}: ${textOf(o.evalue)}`);
+    else if (o.output_type === "display_data" || o.output_type === "execute_result") {
+      const d = (o.data ?? {}) as Record<string, unknown>;
+      if (d["text/plain"] !== undefined) parts.push(textOf(d["text/plain"]));
+      if (Object.keys(d).some((k) => k.startsWith("image/"))) parts.push("[image output]");
+      else if (d["text/html"] && d["text/plain"] === undefined) parts.push("[html output]");
+    }
+  }
+  return parts.join("\n").replace(ANSI, "");
+}

@@ -1,7 +1,7 @@
 "use client";
 import hljs from "highlight.js/lib/core";
 import python from "highlight.js/lib/languages/python";
-import { ArrowDown, ArrowUp, Check, Clock, Copy, Eraser, Play, Square, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, Clock, Copy, Eraser, Play, Sparkles, Square, Trash2, X } from "lucide-react";
 import { memo } from "react";
 import { cn } from "@/lib/utils/cn";
 import type { Cell, CellType } from "@/lib/lab/notebook";
@@ -32,6 +32,7 @@ interface Props {
   onSource: (id: string, v: string) => void;
   onRun: (id: string, mode: "next" | "stay" | "insert") => void;
   onInterrupt: () => void;
+  onAskAI?: (id: string, mode: "explain" | "fix") => void;
   run?: RunState;
   lastRun?: LastRun;
   onEscape: () => void;
@@ -138,6 +139,11 @@ export const CellView = memo(function CellView(p: Props) {
             <IconBtn label="Duplicate cell" onClick={() => p.onDuplicate(cell.id)}>
               <Copy size={14} />
             </IconBtn>
+            {p.onAskAI && isCode && (
+              <IconBtn label="Explain this cell with AI" onClick={() => p.onAskAI?.(cell.id, "explain")}>
+                <Sparkles size={14} />
+              </IconBtn>
+            )}
             {isCode && (
               <IconBtn label="Clear output" onClick={() => p.onClearOutputs(cell.id)} disabled={!cell.outputs.length && cell.executionCount === null}>
                 <Eraser size={14} />
@@ -168,6 +174,13 @@ export const CellView = memo(function CellView(p: Props) {
             </pre>
           )}
           {isCode && <OutputView outputs={cell.outputs} projectId={p.projectId} dir={p.dir} />}
+          {isCode && p.onAskAI && !busy && cell.outputs.some((o) => o.output_type === "error") && (
+            <div className="border-t border-border bg-bg/40 px-3 py-1.5">
+              <button onClick={(e) => { e.stopPropagation(); p.onAskAI?.(cell.id, "fix"); }} className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-accent/50 px-2.5 py-1 text-xs text-accent hover:bg-accent/10">
+                <Sparkles size={12} /> Fix with AI
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
