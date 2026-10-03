@@ -98,7 +98,7 @@ export function LabAdminView() {
                         <td className="px-3 py-2.5 font-medium">{r.project_name}<span className="ml-2 text-xs font-normal text-muted">{r.status}</span></td>
                         <td className="px-3 py-2.5">{r.owner}</td>
                         <td className="px-3 py-2.5 text-xs tabular-nums text-muted">
-                          RAM {r.usage?.ram_mb ?? "–"} MB · GPU {r.usage?.gpu_mib ?? "–"} MiB · {r.kernels?.length ?? 0} kernel{r.kernels?.length === 1 ? "" : "s"}
+                          RAM {r.usage?.ram_mb ?? "–"} MB · GPU {r.usage?.gpu_mib ?? "–"} MiB · disk {r.usage?.disk_mb ?? "–"} MB · {r.kernels?.length ?? 0} kernel{r.kernels?.length === 1 ? "" : "s"} · {r.terminals ?? 0} terminal{r.terminals === 1 ? "" : "s"}{r.blocked ? " · runs paused (disk full)" : ""}
                         </td>
                         <td className="px-2">
                           <button

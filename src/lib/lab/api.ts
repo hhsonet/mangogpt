@@ -1,5 +1,5 @@
 import { labApi } from "@/hooks/lab";
-import type { FileEntry, LabProject, NbJson, OpenedNotebook, Revision, RuntimeInfo } from "./types";
+import type { FileEntry, HistoryPoint, LabProject, NbJson, OpenedNotebook, PackageInfo, PackageJob, Revision, RuntimeInfo, TerminalInfo } from "./types";
 
 const q = (o: Record<string, string | undefined>) => new URLSearchParams(Object.entries(o).filter(([, v]) => v !== undefined) as [string, string][]).toString();
 const base = (id: string) => `/projects/${id}`;
@@ -36,6 +36,22 @@ export const runtimeApi = {
   start: (id: string) => labApi<RuntimeInfo>(`${base(id)}/runtime`, { method: "POST" }),
   stop: (id: string) => labApi<RuntimeInfo>(`${base(id)}/runtime`, { method: "DELETE" }),
   mine: () => labApi<{ runtimes: RuntimeInfo[] }>("/runtimes"),
+  history: (id: string, minutes = 15) => labApi<{ samples: HistoryPoint[] }>(`${base(id)}/runtime/history?minutes=${minutes}`),
+};
+
+export const terminalsApi = {
+  list: (id: string) => labApi<{ terminals: TerminalInfo[] }>(`${base(id)}/terminals`),
+  create: (id: string) => labApi<TerminalInfo>(`${base(id)}/terminals`, { method: "POST" }),
+  close: (id: string, tid: string) => labApi<{ closed: boolean }>(`${base(id)}/terminals/${tid}`, { method: "DELETE" }),
+};
+
+export const packagesApi = {
+  list: (id: string) => labApi<{ installed: PackageInfo[]; shared: PackageInfo[]; job: PackageJob | null }>(`${base(id)}/packages`),
+  install: (id: string, specs: string[]) => labApi<PackageJob>(`${base(id)}/packages/install`, { method: "POST", body: JSON.stringify({ specs }) }),
+  uninstall: (id: string, specs: string[]) => labApi<PackageJob>(`${base(id)}/packages/uninstall`, { method: "POST", body: JSON.stringify({ specs }) }),
+  job: (id: string, jobId: string, offset: number) => labApi<PackageJob & { log: string; next_offset: number }>(`${base(id)}/packages/jobs/${jobId}?offset=${offset}`),
+  cancel: (id: string, jobId: string) => labApi<PackageJob>(`${base(id)}/packages/jobs/${jobId}`, { method: "DELETE" }),
+  reset: (id: string) => labApi<{ installed: PackageInfo[] }>(`${base(id)}/packages/environment`, { method: "DELETE" }),
 };
 
 export interface UploadResult {

@@ -7,9 +7,11 @@ import json
 import logging
 import os
 import shutil
+import signal
 import socket
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,8 +27,11 @@ from app.deps import LabAccess, User
 from app.drivers import Driver, RuntimeSpec, SystemdUserDriver
 from app.errors import ApiError
 from app.models import Project
+from app.services import environments
 from app.services.kernel_bridge import KernelError, NotebookSession, Execution
-from app.services.projects import workspace_dir
+from app.services.packages import packages
+from app.services.projects import user_usage, workspace_dir
+from app.services.terminals import terminals
 from app.usage import log_event
 
 log = logging.getLogger("mangolab.runtime")
@@ -69,6 +74,16 @@ class RuntimeHandle:
     mem_max_mb: int = 6144
     gpu_budget_mib: int = 4096
     idle_timeout_min: int = 60
+    disk_quota_mb: int = 20480
+    python: Path = field(default_factory=lambda: Path("python"))
+    history: deque = field(default_factory=lambda: deque(maxlen=360))   # last 30 minutes at one sample per 5 s
+    disk: dict[str, Any] = field(default_factory=lambda: {"used_mb": None, "quota_mb": None})
+    gpu_over: int = 0
+    gpu_warned: bool = False
+    disk_blocked: bool = False
+    disk_warned: bool = False
+    oom_kills: int = 0
+    oom_seen: int = 0
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.monotonic)
     sessions: dict[str, NotebookSession] = field(default_factory=dict)
@@ -100,7 +115,9 @@ class RuntimeHandle:
             "status": self.status, "runtime_id": self.runtime_id, "project_id": str(self.project_id), "project_name": self.project_name, "error": self.error,
             "started_at": datetime.fromtimestamp(self.started_at, timezone.utc).isoformat(), "idle_timeout_min": self.idle_timeout_min,
             "limits": {"cpu_quota_pct": self.cpu_quota_pct, "mem_max_mb": self.mem_max_mb, "gpu_budget_mib": self.gpu_budget_mib},
-            "usage": self.usage,
+            "usage": {**self.usage, "disk_mb": self.disk["used_mb"], "disk_quota_mb": self.disk["quota_mb"]},
+            "blocked": self.disk_blocked,
+            "terminals": len(terminals.for_runtime(self.runtime_id)),
             "kernels": [{"path": p, "state": s.state, "execution_count": s.execution_count, "running": len(s.active)} for p, s in self.sessions.items()],
         }
 
@@ -158,7 +175,9 @@ class RuntimeManager:
             manager=self, runtime_id=rid, project_id=project.id, project_name=project.name, owner_id=project.owner_id, owner_name=user.username,
             workspace=workspace_dir(project.owner_id, project.id), state_dir=s.runtimes_dir / rid,
             cpu_quota_pct=access.cpu_quota_pct, mem_max_mb=access.mem_max_mb, gpu_budget_mib=access.gpu_budget_mib, idle_timeout_min=access.idle_timeout_min,
+            disk_quota_mb=access.disk_quota_mb,
         )
+        rt.disk = {"used_mb": None, "quota_mb": access.disk_quota_mb}
         self.runtimes[project.id] = rt
         self.last_errors.pop(project.id, None)
         rt.start_task = asyncio.create_task(self._start(rt, user))
@@ -171,7 +190,8 @@ class RuntimeManager:
             await run_in_threadpool(lambda: rt.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700))
             rt.workspace.mkdir(parents=True, exist_ok=True)
             rt.port, rt.token = _free_port(), uuid.uuid4().hex + uuid.uuid4().hex
-            spec = RuntimeSpec(rt.runtime_id, rt.workspace, rt.state_dir, rt.port, rt.token, rt.cpu_quota_pct, rt.mem_max_mb, rt.gpu_budget_mib)
+            rt.python = await environments.ensure_overlay(rt.workspace)  # the project's own packages on top of the shared ones
+            spec = RuntimeSpec(rt.runtime_id, rt.workspace, rt.state_dir, rt.python, rt.port, rt.token, rt.cpu_quota_pct, rt.mem_max_mb, rt.gpu_budget_mib)
             await self._db_insert(rt)
             rt.unit = await self.driver.start(spec)
             fd = os.open(rt.state_dir / "conn.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # lets a restarted API re-adopt this runtime
@@ -194,6 +214,7 @@ class RuntimeManager:
                 await asyncio.sleep(0.25)
             rt.status = "running"
             rt.touch()
+            self._spawn(self._check_disk(rt))  # show disk use from the start, not after the first periodic check
             await self._db_status(rt, "idle")
             await self._audit(user.id, user.username, "lab.runtime.start", f"{rt.project_name} ({int((time.monotonic() - t0) * 1000)} ms)")
             rt.broadcast({"type": "runtime", **rt.view()})
@@ -232,10 +253,11 @@ class RuntimeManager:
                 except Exception:  # noqa: BLE001
                     log.exception("kernel shutdown failed")
             rt.sessions.clear()
+            terminals.close_all(rt.runtime_id)
             try:
-                await self.driver.stop(rt.unit or self.driver.unit_name(rt.runtime_id))
+                await self.driver.stop(rt.runtime_id)  # the whole resource group: gateway, kernels, terminals, installs
             except Exception:  # noqa: BLE001
-                log.exception("could not stop runtime unit")
+                log.exception("could not stop the runtime")
             if rt.http:
                 await rt.http.aclose()
             await self._db_stopped(rt, "error" if reason == "error" else "stopped", detail)
@@ -304,8 +326,10 @@ class RuntimeManager:
 
     async def _sampler(self) -> None:
         interval = get_settings().sample_interval_s
+        tick = 0
         while True:
             await asyncio.sleep(interval)
+            tick += 1
             try:
                 live = [r for r in self.runtimes.values() if r.status == "running"]
                 if not live:
@@ -313,15 +337,23 @@ class RuntimeManager:
                 gpu = await _gpu_by_pid()
                 now = time.monotonic()
                 for rt in live:
-                    u = await self.driver.usage(rt.unit)
+                    u = await self.driver.usage(rt.runtime_id)
                     cpu_pct = None
                     if u.cpu_usec is not None:
                         if rt._cpu_prev:
                             dt = now - rt._cpu_prev[1]
                             cpu_pct = round((u.cpu_usec - rt._cpu_prev[0]) / 1e6 / dt * 100, 1) if dt > 0 else None
                         rt._cpu_prev = (u.cpu_usec, now)
-                    rt.usage = {"ram_mb": u.ram_mb, "gpu_mib": sum(gpu.get(p, 0) for p in u.pids), "cpu_pct": cpu_pct}
-                    rt.broadcast({"type": "usage", **rt.usage})
+                    gpu_mib = sum(gpu.get(p, 0) for p in u.pids)
+                    rt.usage = {"ram_mb": u.ram_mb, "gpu_mib": gpu_mib, "cpu_pct": cpu_pct}
+                    rt.oom_kills = u.oom_kills
+                    rt.history.append({"t": time.time(), "ram_mb": u.ram_mb, "gpu_mib": gpu_mib, "cpu_pct": cpu_pct})
+                    rt.broadcast({"type": "usage", **rt.usage, "disk_mb": rt.disk["used_mb"], "disk_quota_mb": rt.disk["quota_mb"]})
+                    if tick % 3 == 0:
+                        self._spawn(self._db_sample(rt, u.ram_mb, gpu_mib, cpu_pct))
+                    if tick % 6 == 1:
+                        self._spawn(self._check_disk(rt))
+                    await self._check_gpu(rt, gpu, u.pids, gpu_mib)
                     if rt.status == "running" and not await self.driver.is_active(rt.unit):
                         self._spawn(self.stop(rt.project_id, reason="crashed"))
             except asyncio.CancelledError:
@@ -329,24 +361,146 @@ class RuntimeManager:
             except Exception:  # noqa: BLE001
                 log.exception("sampler failed")
 
+    # ------------------------------------------------------------------ limits that systemd cannot enforce
+    async def _check_gpu(self, rt: RuntimeHandle, gpu: dict[int, int], pids: list[int], total: int) -> None:
+        """The GPU has no per-group limit, so it is watched: warn near the budget; if the runtime stays over it, end the process using the most."""
+        budget = rt.gpu_budget_mib
+        if total >= 0.9 * budget and not rt.gpu_warned:
+            rt.gpu_warned = True
+            rt.broadcast({"type": "limit", "kind": "gpu", "level": "warn", "message": f"GPU memory is at {total} of {budget} MiB. Free some (delete tensors, torch.cuda.empty_cache()) to avoid being stopped."})
+        elif total < 0.8 * budget:
+            rt.gpu_warned = False
+        rt.gpu_over = rt.gpu_over + 1 if total > budget * 1.05 else 0
+        if rt.gpu_over < 2:
+            return  # one spike is fine; two samples in a row (about 10 s) is not
+        rt.gpu_over = 0
+        mine = {p: gpu.get(p, 0) for p in pids if gpu.get(p, 0) > 0}
+        if not mine:
+            return
+        victim = max(mine, key=lambda p: mine[p])
+        msg = f"Stopped because this runtime used {total} MiB of GPU memory, over the {budget} MiB limit for your account. Free GPU memory or ask an admin for a larger limit."
+        sess = self._kernel_for_pid(rt, victim)
+        if sess:
+            sess.kill_reason = msg
+        else:
+            for t in terminals.for_runtime(rt.runtime_id):
+                terminals.notice(t, f"[MangoLab] a process was stopped: {msg}")
+        log.warning("GPU over budget in runtime %s (%d/%d MiB): killing pid %d", rt.runtime_id[:8], total, budget, victim)
+        try:
+            os.kill(victim, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        rt.broadcast({"type": "limit", "kind": "gpu", "level": "stopped", "message": msg})
+        self._spawn(self._audit(rt.owner_id, rt.owner_name, "lab.limit", f"{rt.project_name}: GPU {total}/{budget} MiB, process stopped", status="error"))
+
+    @staticmethod
+    def _ppid(pid: int) -> int:
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                return int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return 0
+
+    def _kernel_for_pid(self, rt: RuntimeHandle, pid: int) -> NotebookSession | None:
+        """Which notebook's kernel does this process belong to (the kernel itself, or a worker it started)?"""
+        by_pid = {s.pid: s for s in rt.sessions.values() if s.pid}
+        for _ in range(12):
+            if pid in by_pid:
+                return by_pid[pid]
+            pid = self._ppid(pid)
+            if pid <= 1:
+                break
+        return None
+
+    async def _check_disk(self, rt: RuntimeHandle) -> None:
+        """Kernels and terminals write straight to the workspace, so the quota is checked while a runtime runs, not only on upload."""
+        try:
+            async with db.session() as c:
+                used = await user_usage(c, User(rt.owner_id, rt.owner_name, "user"))
+        except Exception:  # noqa: BLE001
+            return
+        quota = rt.disk_quota_mb * 1024 * 1024
+        rt.disk = {"used_mb": round(used / 1048576), "quota_mb": rt.disk_quota_mb}
+        if used >= 1.5 * quota:
+            rt.broadcast({"type": "limit", "kind": "disk", "level": "stopped", "message": "The runtime was stopped because your workspace grew far past its disk limit. Delete files, then connect again."})
+            self._spawn(self._audit(rt.owner_id, rt.owner_name, "lab.limit", f"{rt.project_name}: disk {rt.disk['used_mb']}/{rt.disk_quota_mb} MB, runtime stopped", status="error"))
+            self._spawn(self.stop(rt.project_id, reason="disk_full"))
+        elif used >= quota and not rt.disk_blocked:
+            rt.disk_blocked = True
+            msg = f"Your workspace is over its {_fmt_mb(rt.disk_quota_mb)} limit, so running cells is paused. Delete some files (the file list or a terminal), and it resumes by itself."
+            rt.broadcast({"type": "limit", "kind": "disk", "level": "blocked", "message": msg})
+            for sess in rt.sessions.values():
+                if sess.active:
+                    try:
+                        await sess.interrupt()
+                    except Exception:  # noqa: BLE001
+                        pass
+            self._spawn(self._audit(rt.owner_id, rt.owner_name, "lab.limit", f"{rt.project_name}: disk over quota, runs paused", status="error"))
+        elif rt.disk_blocked and used < 0.95 * quota:
+            rt.disk_blocked = False
+            rt.disk_warned = False
+            rt.broadcast({"type": "limit", "kind": "disk", "level": "ok", "message": "Disk space is back under the limit. You can run cells again."})
+        elif used >= 0.9 * quota and not rt.disk_warned:
+            rt.disk_warned = True
+            rt.broadcast({"type": "limit", "kind": "disk", "level": "warn", "message": f"Your workspace is at {round(used / quota * 100)}% of its disk limit."})
+        elif used < 0.8 * quota:
+            rt.disk_warned = False
+
     async def _idle_sweeper(self) -> None:
+        last_prune = 0.0
         while True:
             await asyncio.sleep(get_settings().sweep_interval_s)
             try:
                 await self._stop_unauthorized()
+                if time.monotonic() - last_prune > 3600:
+                    last_prune = time.monotonic()
+                    await self._prune_old()
                 for rt in list(self.runtimes.values()):
                     if rt.status != "running":
                         continue
                     for sess in rt.sessions.values():
                         sess.prune()
-                    busy = any(s.active for s in rt.sessions.values())
-                    if not busy and time.monotonic() - rt.last_activity > rt.idle_timeout_min * 60:
+                    # Quiet is not idle while a cell runs, a terminal has a program running, or an install is in progress.
+                    busy = any(s.active for s in rt.sessions.values()) or terminals.busy(rt.runtime_id) or packages.running_for_project(rt.project_id) is not None
+                    if busy:
+                        rt.touch()
+                    elif time.monotonic() - rt.last_activity > rt.idle_timeout_min * 60:
                         log.info("stopping idle runtime %s", rt.project_id)
                         self._spawn(self.stop(rt.project_id, reason="idle"))
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
                 log.exception("idle sweeper failed")
+
+    async def _prune_old(self) -> None:
+        try:
+            async with db.session() as c:
+                await c.execute(text("DELETE FROM mangolab.resource_samples WHERE ts < now() - interval '24 hours'"))
+                await c.commit()
+            await packages.cleanup_old_logs()
+        except Exception:  # noqa: BLE001
+            log.exception("prune failed")
+
+    async def _db_sample(self, rt: RuntimeHandle, ram: int | None, gpu: int, cpu: float | None) -> None:
+        try:
+            async with db.session() as c:
+                await c.execute(text("INSERT INTO mangolab.resource_samples (runtime_id, cpu_pct, ram_mb, gpu_mem_mib) VALUES (:r, :c, :m, :g)"),
+                                {"r": uuid.UUID(rt.runtime_id), "c": cpu, "m": ram, "g": gpu})
+                await c.commit()
+        except Exception:  # noqa: BLE001
+            pass  # the runtime may just have been removed
+
+    async def history(self, project_id: uuid.UUID, minutes: int) -> list[dict[str, Any]]:
+        rt = self.runtimes.get(project_id)
+        if not rt:
+            return []
+        if minutes <= 30:
+            cutoff = time.time() - minutes * 60
+            return [h for h in rt.history if h["t"] >= cutoff]
+        async with db.session() as c:
+            rows = (await c.execute(text("SELECT extract(epoch from ts) AS ts_s, ram_mb, gpu_mem_mib, cpu_pct FROM mangolab.resource_samples WHERE runtime_id = :r AND ts > now() - make_interval(mins => :m) ORDER BY ts"),
+                                    {"r": uuid.UUID(rt.runtime_id), "m": minutes})).all()
+        return [{"t": float(r.ts_s), "ram_mb": r.ram_mb, "gpu_mib": r.gpu_mem_mib, "cpu_pct": r.cpu_pct} for r in rows]
 
     async def _stop_unauthorized(self) -> None:
         """A runtime belongs to someone who must still be active and still have MangoLab access (admins always do)."""
@@ -390,29 +544,33 @@ class RuntimeManager:
             if not ok:
                 await self._db_mark_stopped(row.id)
                 try:
-                    await self.driver.stop(unit)
+                    await self.driver.stop(rid)
                 except Exception:  # noqa: BLE001
                     pass
                 continue
             rt = RuntimeHandle(manager=self, runtime_id=rid, project_id=row.project_id, project_name=row.pname, owner_id=row.owner_id, owner_name=row.username,
                                workspace=workspace_dir(row.owner_id, row.project_id), state_dir=s.runtimes_dir / rid, unit=unit, port=info["port"], token=info["token"],
-                               status="running", cpu_quota_pct=row.cpu_quota_pct, mem_max_mb=row.mem_max_mb, gpu_budget_mib=row.gpu_budget_mib, http=http)
+                               status="running", cpu_quota_pct=row.cpu_quota_pct, mem_max_mb=row.mem_max_mb, gpu_budget_mib=row.gpu_budget_mib, http=http,
+                               python=_python_for(workspace_dir(row.owner_id, row.project_id)))
             rt.started_at = row.started_at.timestamp()
             async with db.session() as conn:
                 ks = (await conn.execute(text(
                     "SELECT k.kernel_id, n.path FROM mangolab.kernel_sessions k JOIN mangolab.notebooks n ON n.id = k.notebook_id WHERE k.runtime_id = :r AND k.status <> 'dead'"), {"r": row.id})).all()
-                acc = (await conn.execute(text("SELECT idle_timeout_min FROM mangolab.lab_access WHERE user_id = :u"), {"u": row.owner_id})).first()
+                acc = (await conn.execute(text("SELECT idle_timeout_min, disk_quota_mb FROM mangolab.lab_access WHERE user_id = :u"), {"u": row.owner_id})).first()
             rt.idle_timeout_min = acc.idle_timeout_min if acc else 60
+            rt.disk_quota_mb = acc.disk_quota_mb if acc else 20480
+            rt.disk = {"used_mb": None, "quota_mb": rt.disk_quota_mb}
+            self._spawn(self._check_disk(rt))
             for k in ks:
                 sess = self.session(rt, k.path)
                 sess.kernel_id, sess.state = k.kernel_id, "idle"
             self.runtimes[row.project_id] = rt
-            known.add(unit)
+            known.update({unit, self.driver.slice_name(rid)})
             log.info("re-adopted runtime %s (%d kernels)", rid[:8], len(ks))
         for unit in await self.driver.list_units():  # units with no database row are leftovers
             if unit not in known:
                 log.warning("stopping orphan runtime unit %s", unit)
-                await self.driver.stop(unit)
+                await self.driver.stop_unit(unit)
 
     # ------------------------------------------------------------------ database bookkeeping (best effort: never breaks a running notebook)
     async def _db_insert(self, rt: RuntimeHandle) -> None:
@@ -483,6 +641,16 @@ class RuntimeManager:
             except Exception:  # noqa: BLE001
                 log.exception("could not record execution")
         self._spawn(go())
+
+
+def _python_for(workspace: Path) -> Path:
+    """The project's overlay Python, or the shared one for a runtime that was started before projects had their own environment."""
+    py = environments.overlay_python(workspace)
+    return py if py.exists() else environments.base_python()
+
+
+def _fmt_mb(mb: int) -> str:
+    return f"{mb / 1024:g} GiB" if mb >= 1024 else f"{mb} MB"
 
 
 async def _gpu_by_pid() -> dict[int, int]:

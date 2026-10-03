@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils/cn";
+import { ResourcePopover } from "./ResourcePopover";
 import { useRuntime, useRuntimeClient } from "./RuntimeContext";
 
 const gb = (mb: number | null | undefined) => (mb == null ? "–" : mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`);
@@ -14,6 +15,7 @@ const REASONS: Record<string, string> = {
   access_removed: "Your MangoLab access ended, so the runtime was stopped.",
   crashed: "The runtime stopped unexpectedly. Press Connect to start it again.",
   project_deleted: "The project was deleted.",
+  disk_full: "Your runtime was stopped because your workspace grew far past its disk limit. Delete files, then connect again.",
 };
 
 /** Runtime status pill, usage and Connect / Disconnect for the whole project. */
@@ -25,6 +27,7 @@ export function RuntimeBar() {
   const connecting = useRuntime((s) => s.connecting);
   const conn = useRuntime((s) => s.conn);
   const [confirm, setConfirm] = useState(false);
+  const [panel, setPanel] = useState(false);
   const [err, setErr] = useState("");
   const busy = status === "starting" || connecting;
   const connect = () => {
@@ -37,17 +40,25 @@ export function RuntimeBar() {
 
   return (
     <>
-      <span
-        title={status === "running" && limits ? `Limits: ${gb(limits.mem_max_mb)} RAM, ${(limits.cpu_quota_pct / 100).toFixed(1)} CPU cores, ${gb(limits.gpu_budget_mib)} GPU` : "The runtime runs your code on the server's GPU"}
-        className={cn("flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs", status === "running" ? "border-emerald-500/40" : "border-border text-muted")}
-        role="status"
-      >
-        {busy ? <Loader2 size={11} className="animate-spin text-amber-500" /> : <span className={cn("h-2 w-2 rounded-full", dot)} />}
-        <span className="max-sm:sr-only">{label}</span>
-        {status === "running" && usage && (usage.ram_mb != null || usage.gpu_mib != null) && (
-          <span className="hidden text-muted tabular-nums lg:inline">RAM {gb(usage.ram_mb)} · GPU {gb(usage.gpu_mib)}</span>
-        )}
-      </span>
+      <div className="relative">
+        <button
+          data-resource-toggle
+          type="button"
+          onClick={() => status === "running" && setPanel((v) => !v)}
+          aria-expanded={status === "running" ? panel : undefined}
+          aria-haspopup={status === "running" ? "dialog" : undefined}
+          title={status === "running" && limits ? `Limits: ${gb(limits.mem_max_mb)} RAM, ${(limits.cpu_quota_pct / 100).toFixed(1)} CPU cores, ${gb(limits.gpu_budget_mib)} GPU. Click for details.` : "The runtime runs your code on the server's GPU"}
+          className={cn("flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs", status === "running" ? "cursor-pointer border-emerald-500/40 hover:bg-surface-2" : "cursor-default border-border text-muted")}
+          role="status"
+        >
+          {busy ? <Loader2 size={11} className="animate-spin text-amber-500" /> : <span className={cn("h-2 w-2 rounded-full", dot)} />}
+          <span className="max-sm:sr-only">{label}</span>
+          {status === "running" && usage && (usage.ram_mb != null || usage.gpu_mib != null) && (
+            <span className="hidden text-muted tabular-nums lg:inline">RAM {gb(usage.ram_mb)} · GPU {gb(usage.gpu_mib)}</span>
+          )}
+        </button>
+        {panel && status === "running" && <ResourcePopover onClose={() => setPanel(false)} />}
+      </div>
       {status === "running" ? (
         <Button size="sm" variant="outline" onClick={() => setConfirm(true)} className="max-sm:px-2">
           <Unplug size={14} /> <span className="max-sm:sr-only">Disconnect</span>
@@ -91,12 +102,21 @@ export function RuntimeNotices() {
   const reason = useRuntime((s) => s.runtime.reason);
   const status = useRuntime((s) => s.runtime.status);
   const conflict = useRuntime((s) => s.conflict);
+  const notice = useRuntime((s) => s.notice);
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const note = status === "none" && reason && reason !== "user" && REASONS[reason] && dismissed !== reason ? REASONS[reason] : null;
 
   return (
     <>
+      {notice && (
+        <div role={notice.level === "warn" ? "status" : "alert"} className={cn("flex items-center gap-2 border-b px-4 py-1.5 text-sm", notice.level === "warn" ? "border-amber-500/40 bg-amber-500/10" : "border-danger/40 bg-danger/10")}>
+          <span className="flex-1">{notice.message}</span>
+          <button aria-label="Dismiss" onClick={() => client.dismissNotice()} className="cursor-pointer rounded p-1 hover:bg-surface-2">
+            <X size={14} />
+          </button>
+        </div>
+      )}
       {note && (
         <div role="status" className="flex items-center gap-2 border-b border-amber-500/40 bg-amber-500/10 px-4 py-1.5 text-sm">
           <span className="flex-1">{note}</span>

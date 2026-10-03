@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -40,3 +40,11 @@ async def my_runtimes(lab: tuple[User, LabAccess] = Depends(require_lab)) -> dic
     """The caller's running runtimes, so the UI can say which one to stop when the limit is reached."""
     user, _ = lab
     return {"runtimes": [r.view() for r in manager.for_user(user.id)]}
+
+
+@router.get("/projects/{project_id}/runtime/history")
+async def runtime_history(project_id: uuid.UUID, minutes: int = Query(default=15, ge=1, le=1440), lab: tuple[User, LabAccess] = Depends(require_lab), db: AsyncSession = Depends(get_db)) -> dict:
+    """RAM, GPU and CPU samples for the charts (every 5 s for the last 30 minutes, every 15 s up to a day)."""
+    user, _ = lab
+    await get_owned_project(db, user, project_id)
+    return {"samples": await manager.history(project_id, minutes)}

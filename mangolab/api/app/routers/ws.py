@@ -18,6 +18,7 @@ from app.services.kernel_bridge import KernelError
 from app.services.projects import get_owned_project
 from app.services.runtime_manager import Client, manager
 from app.services.safefs import FsError, clean_path
+from app.services.terminals import terminals
 
 log = logging.getLogger("mangolab.ws")
 
@@ -170,3 +171,66 @@ async def project_socket(ws: WebSocket, project_id: str) -> None:
         pump_task.cancel()
         recheck_task.cancel()
         manager.unsubscribe(pid, client)
+
+
+@router.websocket("/lab-ws/v1/projects/{project_id}/terminals/{terminal_id}")
+async def terminal_socket(ws: WebSocket, project_id: str, terminal_id: str) -> None:
+    """Keystrokes in, terminal output out. The shell keeps running when the page closes; reconnecting replays the recent output."""
+    user = await authenticate_ws(ws)
+    if not user:
+        return
+    try:
+        pid = uuid.UUID(project_id)
+        async with db.session() as conn:
+            await get_owned_project(conn, user, pid)
+    except (ValueError, ApiError):
+        await ws.close(code=NO_ACCESS, reason="project not found")
+        return
+    rt = manager.get(pid)
+    term = terminals.get(rt, terminal_id) if rt else None
+    if not term:
+        await ws.close(code=NO_ACCESS, reason="terminal not found")
+        return
+    await ws.accept()
+    queue = terminals.subscribe(term)
+
+    async def pump() -> None:
+        while True:
+            msg = await queue.get()
+            if msg is None:
+                await ws.close(code=1000, reason="terminal closed")
+                return
+            await ws.send_json(msg)
+
+    async def recheck() -> None:
+        while True:
+            await asyncio.sleep(RECHECK_S)
+            async with db.session() as conn:
+                row = (await conn.execute(text('SELECT status FROM public."User" WHERE id = :id'), {"id": user.id})).first()
+                ok = bool(row and row.status == "active") and (await lab_access_for(conn, user)).enabled
+            if not ok:
+                await ws.close(code=UNAUTHORIZED, reason="access ended")
+                return
+
+    pump_task, recheck_task = asyncio.create_task(pump()), asyncio.create_task(recheck())
+    try:
+        while True:
+            try:
+                msg = json.loads(await ws.receive_text())
+            except ValueError:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("type") == "input" and isinstance(msg.get("data"), str):
+                terminals.write(term, msg["data"])
+            elif msg.get("type") == "resize":
+                try:
+                    terminals.resize(term, int(msg["cols"]), int(msg["rows"]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+    except WebSocketDisconnect:
+        pass
+    finally:
+        pump_task.cancel()
+        recheck_task.cancel()
+        term.queues.discard(queue)

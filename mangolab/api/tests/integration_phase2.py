@@ -55,7 +55,10 @@ async def start(c, s, pid):
     return await wait_running(s)
 
 
+def unit_names(): return set(subprocess.run("systemctl --user list-units 'mangolab*' --all --no-legend --plain | awk '{print $1}'", shell=True, capture_output=True, text=True).stdout.split())
+
 async def main():
+    baseline = unit_names()  # other people's runtimes may be running; only compare what this test adds
     async with client(A) as a, client(B) as b:
         # user B gets small limits so the memory-limit test is cheap
         r = await a.put(f"/admin/users/{B_ID}/access", json={"enabled": True, "mem_max_mb": 1024, "cpu_quota_pct": 200, "max_runtimes": 1, "gpu_budget_mib": 2048}); ok(r.status_code == 200, "admin set user B limits")
@@ -121,7 +124,7 @@ async def main():
             await s.send(type="execute", path=N, cell_id="long", code="import time\ntime.sleep(60)"); await s.until(lambda m: m["type"] == "exec" and m["cell_id"] == "long" and m["state"] == "running")
             t = time.time(); await s.send(type="interrupt", path=N); m = await s.until(lambda m: m["type"] == "exec" and m["cell_id"] == "long" and m["state"] in TERMINAL, 20)
             ok(m["state"] == "error" and time.time() - t < 5, f"interrupt stops a 60 s sleep in {time.time()-t:.1f}s")
-            evs, st = await s.run(N, "z = 5"); await s.send(type="restart", path=N); await s.until(lambda m: m["type"] == "kernel" and m["state"] == "idle", 30)
+            evs, st = await s.run(N, "z = 5"); await s.send(type="restart", path=N); await s.until(lambda m: m["type"] == "kernel" and m["state"] == "restarting", 10); await s.until(lambda m: m["type"] == "kernel" and m["state"] == "idle", 30)
             evs, st = await s.run(N, "print(z)"); ok(st == "error" and outs(evs, "error")[0]["ename"] == "NameError", "restart clears the kernel's variables")
             ok(any(e.get("execution_count") == 1 for e in evs if e["type"] == "exec"), "execution counter starts over after restart")
             evs, st = await s.run(N, "import os; print(os.getcwd().endswith('" + pa + "'))"); ok("True" in text_of(evs), "working folder is restored after a restart")
@@ -191,7 +194,7 @@ async def main():
             await b.delete(f"/projects/{pb2}"); await sb.until(lambda m: m["type"] == "runtime" and m["status"] == "none", 20); ok(not (await b.get("/runtimes")).json()["runtimes"], "deleting a project stops its runtime"); await sb.close()
             r = await a.delete(f"/admin/runtimes/{pa}"); ok(r.status_code == 200, "admin can stop any runtime"); await asyncio.sleep(1)
             ok((await a.get(f"/projects/{pa}/runtime")).json()["status"] == "none", "runtime is gone")
-            units = subprocess.run("systemctl --user list-units 'mangolab-rt-*' --no-legend", shell=True, capture_output=True, text=True).stdout.strip(); ok(units == "", "no systemd units left behind")
+            left = unit_names() - baseline; ok(not left, f"no systemd units left behind ({sorted(left)})")
             ok((await a.delete(f"/projects/{pa}/runtime")).status_code == 200, "stopping when nothing runs is harmless")
         finally:
             for c, p in ((a, pa), (b, pb), (b, pb2)):

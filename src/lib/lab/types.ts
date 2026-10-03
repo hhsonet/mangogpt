@@ -64,6 +64,39 @@ export interface RuntimeUsage {
   ram_mb: number | null;
   gpu_mib: number | null;
   cpu_pct: number | null;
+  disk_mb?: number | null;
+  disk_quota_mb?: number | null;
+}
+
+export interface HistoryPoint {
+  t: number;
+  ram_mb: number | null;
+  gpu_mib: number | null;
+  cpu_pct: number | null;
+}
+
+export interface LimitNotice {
+  kind: "gpu" | "disk";
+  level: "warn" | "blocked" | "stopped" | "ok";
+  message: string;
+}
+
+export interface TerminalInfo {
+  id: string;
+  title: string;
+}
+
+export interface PackageInfo {
+  name: string;
+  version: string;
+}
+
+export interface PackageJob {
+  id: string;
+  action: "install" | "uninstall";
+  specs: string[];
+  status: "running" | "ok" | "error" | "timeout";
+  exit_code: number | null;
 }
 
 export interface RuntimeInfo {
@@ -76,6 +109,8 @@ export interface RuntimeInfo {
   idle_timeout_min?: number;
   limits?: { cpu_quota_pct: number; mem_max_mb: number; gpu_budget_mib: number };
   usage?: RuntimeUsage;
+  blocked?: boolean;
+  terminals?: number;
   kernels?: { path: string; state: KernelState; execution_count: number; running: number }[];
 }
 
@@ -85,6 +120,8 @@ export type LabEvent =
   | ({ type: "runtime" } & RuntimeInfo)
   | ({ type: "usage" } & RuntimeUsage)
   | { type: "pong" }
+  | { type: "limit"; kind: "gpu" | "disk"; level: "warn" | "blocked" | "stopped" | "ok"; message: string }
+  | { type: "packages"; job_id: string; status: string }
   | { type: "renamed"; from: string; to: string }
   | { type: "error"; code: string; message: string; path?: string; cell_id?: string }
   | { type: "kernel"; path: string; state: KernelState; execution_count: number }

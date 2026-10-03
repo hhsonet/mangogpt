@@ -1,7 +1,7 @@
 import { createStore } from "zustand";
 import type { ApiError } from "@/hooks/api";
 import { runtimeApi } from "./api";
-import type { KernelState, LabEvent, RuntimeInfo } from "./types";
+import type { HistoryPoint, KernelState, LabEvent, LimitNotice, RuntimeInfo } from "./types";
 
 export interface LimitConflict {
   message: string;
@@ -18,6 +18,11 @@ export interface RuntimeState {
   connecting: boolean;
   message: string | null;
   conflict: LimitConflict | null;
+  /** The latest warning or action from the server about GPU or disk limits. */
+  notice: LimitNotice | null;
+  history: HistoryPoint[];
+  /** Bumped whenever a package install or uninstall finishes. */
+  packagesVersion: number;
 }
 
 type Handler = (e: LabEvent) => void;
@@ -30,7 +35,7 @@ const START_TIMEOUT_MS = 90_000;
  * It reconnects by itself; on every (re)connect it attaches again, and the server answers with what the page missed.
  */
 export class RuntimeClient {
-  readonly store = createStore<RuntimeState>()(() => ({ conn: "connecting", runtime: { status: "none" }, kernels: {}, connecting: false, message: null, conflict: null }));
+  readonly store = createStore<RuntimeState>()(() => ({ conn: "connecting", runtime: { status: "none" }, kernels: {}, connecting: false, message: null, conflict: null, notice: null, history: [], packagesVersion: 0 }));
   private ws: WebSocket | null = null;
   private handlers = new Map<string, Set<Handler>>();
   private closed = false;
@@ -113,16 +118,27 @@ export class RuntimeClient {
     switch (e.type) {
       case "hello":
         this.store.setState({ runtime: e.runtime });
+        if (e.runtime.status === "running") void this.loadHistory();
         return;
       case "runtime": {
         const { type: _t, ...info } = e;
         void _t;
-        this.store.setState((s) => ({ runtime: info.status === "none" ? { status: "none", error: info.error ?? null, reason: info.reason } : { ...s.runtime, ...info }, kernels: info.status === "none" ? {} : s.kernels }));
+        this.store.setState((s) => ({ runtime: info.status === "none" ? { status: "none", error: info.error ?? null, reason: info.reason } : { ...s.runtime, ...info }, kernels: info.status === "none" ? {} : s.kernels, ...(info.status === "none" ? { history: [], notice: null } : {}) }));
+        if (info.status === "running") void this.loadHistory();
         this.all(e);
         return;
       }
-      case "usage":
-        this.store.setState((s) => ({ runtime: { ...s.runtime, usage: { ram_mb: e.ram_mb, gpu_mib: e.gpu_mib, cpu_pct: e.cpu_pct } } }));
+      case "usage": {
+        const { type: _u, ...usage } = e;
+        void _u;
+        this.store.setState((s) => ({ runtime: { ...s.runtime, usage }, history: [...s.history, { t: Date.now() / 1000, ram_mb: e.ram_mb, gpu_mib: e.gpu_mib, cpu_pct: e.cpu_pct }].slice(-360) }));
+        return;
+      }
+      case "limit":
+        this.store.setState({ notice: e.level === "ok" ? null : { kind: e.kind, level: e.level, message: e.message } });
+        return;
+      case "packages":
+        this.store.setState((s) => ({ packagesVersion: s.packagesVersion + 1 }));
         return;
       case "kernel":
         this.store.setState((s) => ({ kernels: { ...s.kernels, [e.path]: e.state } }));
@@ -207,6 +223,20 @@ export class RuntimeClient {
     this.store.setState({ conflict: null });
     await Promise.all(others.map((o) => runtimeApi.stop(o.project_id)));
     retry();
+  }
+
+  /** Seeds the charts with what happened before this page connected. */
+  async loadHistory() {
+    try {
+      const r = await runtimeApi.history(this.projectId, 15);
+      this.store.setState((s) => ({ history: r.samples.length > s.history.length ? r.samples : s.history }));
+    } catch {
+      /* charts simply start empty */
+    }
+  }
+
+  dismissNotice() {
+    this.store.setState({ notice: null });
   }
 
   dismissConflict() {

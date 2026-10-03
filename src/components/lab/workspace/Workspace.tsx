@@ -1,5 +1,5 @@
 "use client";
-import { ArrowLeft, BookOpen, FileText, FlaskConical, Menu, PanelLeftClose, PanelLeftOpen, Plus, Sparkles, X } from "lucide-react";
+import { ArrowLeft, BookOpen, FileText, FlaskConical, Menu, Package, PanelLeftClose, PanelLeftOpen, Plus, Sparkles, TerminalSquare, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import useSWR from "swr";
@@ -10,6 +10,7 @@ import { baseOf, humanSize, isImageFile, isNotebookFile, isProbablyText } from "
 import type { FileEntry, OpenedNotebook } from "@/lib/lab/types";
 import { cn } from "@/lib/utils/cn";
 import { FileTree } from "./FileTree";
+import { BottomPanel, type PanelTab } from "./BottomPanel";
 import { NotebookEditor } from "./NotebookEditor";
 import { RuntimeBar, RuntimeNotices } from "./RuntimeBar";
 import { RuntimeProvider } from "./RuntimeContext";
@@ -70,6 +71,38 @@ function Inner({ projectId }: { projectId: string }) {
     }
   });
   const [sidebar, setSidebar] = useState(true);
+  const [panel, setPanel] = useState<{ open: boolean; tab: PanelTab; height: number }>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("lab-panel") ?? "{}") as Partial<{ open: boolean; tab: PanelTab; height: number }>;
+      return { open: false, tab: saved.tab === "packages" ? "packages" : "terminal", height: Math.min(Math.max(Number(saved.height) || 300, 160), 700) };
+    } catch {
+      return { open: false, tab: "terminal", height: 300 };
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("lab-panel", JSON.stringify({ tab: panel.tab, height: panel.height }));
+    } catch {
+      /* storage unavailable */
+    }
+  }, [panel.tab, panel.height]);
+  const [panelUsed, setPanelUsed] = useState(false); // mount the tools only once they have been opened
+  const openPanel = (tab: PanelTab) => {
+    setPanelUsed(true);
+    setPanel((p) => (p.open && p.tab === tab ? { ...p, open: false } : { ...p, open: true, tab }));
+  };
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = panel.height;
+    const move = (ev: PointerEvent) => setPanel((p) => ({ ...p, height: Math.min(Math.max(startH + (startY - ev.clientY), 160), Math.floor(window.innerHeight * 0.75)) }));
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
   const [drawer, setDrawer] = useState(false);
   const flushers = useRef(new Map<string, Flush>());
   const registerFlush = useCallback((path: string, f: Flush | null) => void (f ? flushers.current.set(path, f) : flushers.current.delete(path)), []);
@@ -149,6 +182,8 @@ function Inner({ projectId }: { projectId: string }) {
           <span className="ml-1 hidden text-xs text-muted lg:inline" title="Workspace disk used">{humanSize(project.used_bytes)} of {Math.round(project.limits.disk_quota_mb / 1024)} GiB</span>
         )}
         <div className="ml-auto flex items-center gap-1.5">
+          <Button size="icon" variant="ghost" aria-label="Terminal" aria-pressed={panel.open && panel.tab === "terminal"} title="Terminal" onClick={() => openPanel("terminal")} className={cn(panel.open && panel.tab === "terminal" && "bg-surface-2")}><TerminalSquare size={16} /></Button>
+          <Button size="icon" variant="ghost" aria-label="Packages" aria-pressed={panel.open && panel.tab === "packages"} title="Packages" onClick={() => openPanel("packages")} className={cn(panel.open && panel.tab === "packages" && "bg-surface-2")}><Package size={16} /></Button>
           <RuntimeBar />
           <Button size="icon" variant="ghost" disabled title="MangoLab AI assistant arrives in a later step" aria-label="AI assistant (not available yet)"><Sparkles size={16} /></Button>
         </div>
@@ -185,7 +220,7 @@ function Inner({ projectId }: { projectId: string }) {
             </div>
           )}
 
-          <div className="min-h-0 flex-1">
+          <div className="min-h-0 flex-1" style={panel.open ? { flexBasis: 0 } : undefined}>
             {/* Every open notebook and text file stays mounted (hidden when not shown) so runs, undo history and unsaved edits survive a tab switch. */}
             {tabs.map((t) => (
               <div key={t.path} hidden={t.path !== active} role="tabpanel" aria-label={baseOf(t.path)} className="h-full">
@@ -220,6 +255,18 @@ function Inner({ projectId }: { projectId: string }) {
               </div>
             )}
           </div>
+
+          {/* The panel is mounted from the first time it opens and then only hidden, so a shell or an install keeps going. */}
+          {(panel.open || panel.height > 0) && (
+            <div hidden={!panel.open} className="shrink-0" style={{ height: panel.height }}>
+              <div role="separator" aria-orientation="horizontal" aria-label="Resize panel" tabIndex={0} onPointerDown={startResize}
+                onKeyDown={(e) => { if (e.key === "ArrowUp") setPanel((p) => ({ ...p, height: Math.min(p.height + 24, 700) })); if (e.key === "ArrowDown") setPanel((p) => ({ ...p, height: Math.max(p.height - 24, 160) })); }}
+                className="-mb-1 h-1 cursor-row-resize bg-border/0 hover:bg-accent/40 focus-visible:bg-accent/60" />
+              <div className="h-full">
+                {panelUsed && <BottomPanel projectId={projectId} tab={panel.tab} onTab={(t) => setPanel((p) => ({ ...p, tab: t }))} onClose={() => setPanel((p) => ({ ...p, open: false }))} />}
+              </div>
+            </div>
+          )}
         </main>
       </div>
     </div>

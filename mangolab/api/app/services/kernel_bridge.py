@@ -78,6 +78,10 @@ class NotebookSession:
         self._session_id = uuid.uuid4().hex
         self._restart_requested = False
         self._closing = False
+        self._probes: set[str] = set()
+        self._ready = asyncio.Event()
+        self.pid: int | None = None            # the kernel's process id (learned when it starts)
+        self.kill_reason: str | None = None     # set by the watchdog right before it ends this kernel, so the cell can say why
 
     # ---------------------------------------------------------------- events
     def emit(self, msg: dict[str, Any]) -> None:
@@ -141,6 +145,7 @@ class NotebookSession:
             self.kernel_id = r.json()["id"]
             self._restart_requested = False
             await self._connect()
+            await self._wait_ready()
             self._send_init()
             self.set_state("idle")
             await self.rt.manager.persist_kernel_created(self)
@@ -152,29 +157,49 @@ class NotebookSession:
         self._ws = await ws_connect(url, additional_headers={"Authorization": f"token {self.rt.token}"}, max_size=64 * 2**20, ping_interval=20, open_timeout=15)
         self._reader = asyncio.create_task(self._read_loop(self._ws), name=f"kernel-reader-{self.path}")
 
+    async def _wait_ready(self, timeout: float = 15.0) -> bool:
+        """A freshly (re)started kernel can publish for a moment before the gateway's output channel is listening, and those
+        messages are lost. Probe with silent no-op requests until one's status comes back; only then is it safe to run cells."""
+        end = time.monotonic() + timeout
+        self._ready = asyncio.Event()
+        while time.monotonic() < end:
+            if self._ws is None or self._closing:
+                return False
+            mid = self._send_request("pass", silent=True)
+            self.internal.add(mid)
+            self._probes.add(mid)
+            try:
+                await asyncio.wait_for(self._ready.wait(), 0.3)
+                return True
+            except asyncio.TimeoutError:
+                continue
+        return False
+
     def _send_init(self) -> None:
         """Run the notebook from its own folder, like Jupyter does."""
         folder = self.path.rsplit("/", 1)[0] if "/" in self.path else ""
         target = f"{self.rt.workspace}/{folder}" if folder else str(self.rt.workspace)
-        mid = self._send_request("import os as _mlos; _mlos.chdir(%r); del _mlos" % target, silent=True)
+        mid = self._send_request("import os as _mlos; _mlos.chdir(%r); del _mlos" % target, silent=True, expressions={"pid": "__import__('os').getpid()"})
         self.internal.add(mid)
 
-    def _request(self, code: str, silent: bool) -> tuple[str, str]:
+    def _request(self, code: str, silent: bool, expressions: dict[str, str] | None = None) -> tuple[str, str]:
         mid = uuid.uuid4().hex
         return mid, json.dumps({
             "header": {"msg_id": mid, "username": "mangolab", "session": self._session_id, "msg_type": "execute_request", "version": "5.3"},
             "parent_header": {}, "metadata": {}, "buffers": [], "channel": "shell",
-            "content": {"code": code, "silent": silent, "store_history": not silent, "allow_stdin": False, "stop_on_error": True, "user_expressions": {}},
+            "content": {"code": code, "silent": silent, "store_history": not silent, "allow_stdin": False, "stop_on_error": True, "user_expressions": expressions or {}},
         })
 
-    def _send_request(self, code: str, silent: bool = False) -> str:
-        mid, payload = self._request(code, silent)
+    def _send_request(self, code: str, silent: bool = False, expressions: dict[str, str] | None = None) -> str:
+        mid, payload = self._request(code, silent, expressions)
         asyncio.ensure_future(self._ws.send(payload))
         return mid
 
     async def execute(self, cell_id: str, code: str) -> None:
         if len(code.encode()) > MAX_CODE_BYTES:
             raise KernelError("code_too_large", "That cell is too large to run (over 1 MB).")
+        if self.rt.disk_blocked:
+            raise KernelError("disk_full", "Your workspace is over its disk limit, so running cells is paused. Delete some files and try again.")
         if len(self.active) >= MAX_QUEUED:
             raise KernelError("too_many_queued", f"Too many cells are waiting to run (over {MAX_QUEUED}). Wait for some to finish.")
         await self.ensure_kernel()
@@ -207,6 +232,8 @@ class NotebookSession:
         if r.status_code >= 300:
             self.set_state("dead")
             raise KernelError("restart_failed", "The kernel couldn't be restarted.")
+        self.pid = None
+        await self._wait_ready(30)
         self._restart_requested = False
         self._send_init()
         self.set_state("idle")
@@ -267,17 +294,25 @@ class NotebookSession:
         parent = (m.get("parent_header") or {}).get("msg_id")
         c = m.get("content", {})
         ex = self.executions.get(parent) if parent else None
+        if parent in self._probes and t == "status":
+            self._ready.set()
         if parent in self.internal:
             if t == "execute_reply":
+                self._probes.discard(parent)
                 self.internal.discard(parent)
+                try:
+                    self.pid = int(c["user_expressions"]["pid"]["data"]["text/plain"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+                if self.state in ("starting", "restarting") and not self._restart_requested:
+                    self.set_state("idle")  # the restarted kernel answered, so it is alive
             return
         if t == "status":
             state = c.get("execution_state")
             if ex is None:
                 if state == "restarting" and not self._restart_requested:
-                    self._abort_active("died", "The kernel died and was restarted. If it ran out of memory, reduce your batch size or data.", error_name="KernelDied")
                     self.set_state("restarting")
-                    self._send_init_later()
+                    asyncio.create_task(self._explain_death())
                 elif state == "starting" and self.state not in ("idle", "busy"):
                     self.set_state("starting")
                 return
@@ -294,6 +329,10 @@ class NotebookSession:
             return
         self.rt.touch()
         if t == "execute_input":
+            if ex.state == "queued":  # the 'busy' status can be lost right after a restart; execute_input proves the cell is running
+                ex.state, ex.started_at = "running", time.time()
+                self.set_state("busy")
+                self.emit({"type": "exec", "cell_id": ex.cell_id, "msg_id": ex.msg_id, "state": "running"})
             ex.execution_count = c.get("execution_count")
             if ex.execution_count:
                 self.execution_count = max(self.execution_count, ex.execution_count)
@@ -330,10 +369,23 @@ class NotebookSession:
                 loop = asyncio.get_running_loop()
                 ex.grace_handle = loop.call_later(REPLY_GRACE_S, lambda: self._finish(ex, ex.reply_status or "ok") if not ex.done else None)
 
+    async def _explain_death(self) -> None:
+        """Say why the kernel went away: the GPU watchdog, the RAM limit, or something else."""
+        reason, self.kill_reason, self.pid = self.kill_reason, None, None
+        if not reason:
+            try:
+                u = await self.rt.manager.driver.usage(self.rt.runtime_id)
+            except Exception:  # noqa: BLE001
+                u = None
+            if u and u.oom_kills > self.rt.oom_seen:
+                self.rt.oom_seen = u.oom_kills
+                reason = f"The kernel ran out of memory (limit {self.rt.mem_max_mb} MB) and was restarted. Variables are gone; use less memory, for example a smaller batch or dataset."
+        self._abort_active("died", reason or "The kernel died and was restarted. If it ran out of memory, reduce your batch size or data.", error_name="KernelDied")
+        self._send_init_later()
+
     def _send_init_later(self) -> None:
         async def go() -> None:
-            await asyncio.sleep(1.0)
-            if self._ws is not None and not self._closing:
+            if self._ws is not None and not self._closing and await self._wait_ready(30):
                 self._send_init()
         asyncio.create_task(go())
 

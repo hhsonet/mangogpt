@@ -1,7 +1,7 @@
 # MangoLab
 
 Notebooks on your own GPU, inside MangoGPT: a Colab-style workspace (code and Markdown cells, a terminal, a file browser, GPU monitoring) with an AI assistant.
-**Status: Phases 0 to 2 are done: projects, files, notebooks, and running cells on the GPU. The terminal, package installs and the AI assistant come next.** MangoLab does not implement its own Python engine: code runs in real Jupyter kernels.
+**Status: Phases 0 to 3 are done: projects, files, notebooks, running cells on the GPU, a terminal, package installs, live resource monitoring and enforced limits. The AI assistant comes next.** MangoLab does not implement its own Python engine: code runs in real Jupyter kernels.
 
 ## Architecture
 
@@ -80,15 +80,31 @@ browser ──ws /lab-ws/v1/projects/<id>/runtime──▶ FastAPI ──http+ws
 - Notebooks run in their own folder. Renaming a notebook keeps its kernel; deleting one ends it; deleting a project stops its runtime.
 - Admin → MangoLab shows "Running now" (RAM, GPU, kernels) with a stop button per runtime.
 
-**Known gaps (planned for Phase 3 unless noted).**
-- The GPU budget is a setting and is *measured* per runtime, but not yet enforced; one user can use the whole MIG slice.
-- Disk writes from a kernel are not capped while it runs (the quota is checked on uploads and shown in the header).
-- No terminal or package installer yet. The kernel environment is shared by every project (`~/.venvs/mangolab-base`); it is a `uv` environment without `pip`, so `!pip install` does not work yet.
-- No `input()` (stdin is disabled), no Jupyter widgets (`ipywidgets`); `tqdm` works as text.
-- The same notebook open in two browser tabs shows the "changed elsewhere" banner on the second save, as for any concurrent edit.
-- Notebook code is arbitrary code running as the server's Linux user (see Security model). Phase 5 adds real isolation.
+**Known gaps after Phase 2 that Phase 3 closed:** GPU budget enforcement, disk-write cap, terminal, package installs (`%pip` works).
 
 **Tests.** `pytest mangolab/api/tests` (31 unit tests: output merging, safe file layer). `mangolab/api/tests/integration_phase2.py` (about 70 checks against a running API with the real kernel environment: streaming, plots, errors, stop-on-error queue, interrupt, restart, reconnect and replay, flood of output, crash and recovery, RAM-limit kill, per-user limit, isolation, access revocation, API restart; needs `LAB_COOKIE_ADMIN`, `LAB_COOKIE_B`, `LAB_USER_B_ID`, optionally `LAB_RESTART_CMD`). The browser flows were checked with Playwright (connect, run, plot, error, stream, stop, run all, reload during a run, tab switch, restart, limit dialog, disconnect, mobile).
+
+## Phase 3: workspace tools and limits
+**Resource group.** Each runtime is one systemd *slice* (`mangolabrt<id>.slice`) that carries the limits (`MemoryMax`, no swap, `CPUQuota`, `TasksMax`); the Kernel Gateway (so every kernel), every terminal and every package install of that project run inside it, so they **share** one budget. Stopping the runtime stops the whole slice.
+
+**Project environments and packages.** The shared environment (`~/.venvs/mangolab-base`: CUDA PyTorch, NumPy, pandas, matplotlib, scikit-learn...) is installed once. A project's *overlay* is a small virtual environment in its workspace (`.mangolab/venv`, counted in the disk quota, created on first connect in about a second) with its own `pip`; a `.pth` file makes the shared packages visible, so `pip` sees them as already installed (no second copy of PyTorch; checked: installing scikit-image touched nothing shared). The gateway runs on the overlay's Python, so notebooks, terminals and `%pip install` agree. Packages panel: install by name/version (no flags, URLs or paths are accepted), a live log, uninstall, "reset project packages" (runtime must be disconnected), the preinstalled list. Jobs run as scopes with limits and a 15-minute cap; one at a time per project; refused when the workspace is over 95% of its quota. A package used in notebooks right after install needs no restart (a restart picks up upgrades of already-imported packages). Per-project overlays cannot affect other people's projects.
+
+**Terminal.** xterm.js in a bottom panel (up to 3 per runtime). Each is bash on a pseudo-terminal in a scope under the runtime's slice, in the workspace, with the project's Python first on PATH, a minimal environment, `ulimit -n 8192`, and a prompt that shows project-relative paths. Output is kept (256 KB) so a reload or a second tab gets the screen back; shells end with the runtime. A terminal running a program counts as activity, so a quiet training script never trips the idle shutdown. WebSocket: `/lab-ws/v1/projects/<id>/terminals/<tid>` (same cookie + origin checks, owner only). REST: `GET/POST/DELETE /projects/<id>/terminals`.
+
+**Monitoring.** Every 5 s (`SAMPLE_INTERVAL_S`) per runtime: RAM and CPU from the slice's cgroup, GPU memory per process from `nvidia-smi` joined to the runtime by process id, disk from the user's workspaces (every 30 s and at connect). The status pill opens a panel with meters and sparklines against the account's limits. History: 30 minutes in memory (5 s), up to 24 h in `mangolab.resource_samples` (15 s, pruned hourly): `GET /projects/<id>/runtime/history?minutes=`. Admin → MangoLab → Running now shows RAM, GPU, disk, kernels, terminals per runtime.
+
+**Limits that systemd cannot enforce, enforced by the sampler.**
+- *GPU memory.* Warning at 90% of the account's budget. Over 105% for two samples in a row (about 10 s) ends the process using the most GPU memory in that runtime (the kernel, or a process in a terminal), and the cell says why ("used 1126 MiB of the 512 MiB limit"). Other kernels and the runtime stay up. There is no in-kernel cap, so PyTorch itself does not raise an out-of-memory error first.
+- *RAM.* Hard cgroup limit; an OOM kill is detected from the cgroup's `oom_kill` counter, so the cell reports "ran out of memory (limit N MB)" instead of a generic crash.
+- *Disk.* Kernels and terminals write straight to the workspace, so the quota is checked while a runtime runs: warning at 90%; over 100% interrupts running cells and refuses new runs until space is freed (terminals and the file list can still delete; runs resume by themselves under 95%); over 150% stops the runtime.
+- *Processes and files.* `TasksMax`, `LimitNOFILE=8192`, no core dumps.
+- Idle shutdown (60 min by default) ignores runtimes with a cell running, a terminal program running, or an install in progress.
+
+**Audit.** `public."UsageEvent"` (shown on the admin Usage page) now also gets `lab.terminal` (opened), `lab.packages` (install/uninstall and outcome) and `lab.limit` (GPU process stopped, disk paused or stopped), next to `lab.runtime.start/stop`. Metadata only: never code, output, terminal input or file contents.
+
+**Operational notes.** Terminals do not survive an API restart (their pseudo-terminals live in the API process; the runtime and kernels do). Package logs are kept 7 days in `~/mangolab-data/jobs`. `SAMPLE_INTERVAL_S` and `MANGOLAB_SWEEP_S` are for testing. Still true: notebook code and terminals run as the server's Linux user (see Security model); Phase 5 adds real isolation.
+
+**Tests.** `integration_phase3.py` (about 55 checks: package validation and isolation, install/use/uninstall, `%pip`, terminals (input, resize, Ctrl+C, cgroup membership, replay, limits, other-user refusal), monitoring, reset, the GPU watchdog and the disk guard end to end; needs network for pip; start the API with `SAMPLE_INTERVAL_S=1` for speed). Browser flows with Playwright: terminal, reload, resize, resource panel, install/uninstall, GPU notice, mobile.
 
 ## Plan
 | Phase | Scope | State |
@@ -96,6 +112,6 @@ browser ──ws /lab-ws/v1/projects/<id>/runtime──▶ FastAPI ──http+ws
 | 0 Foundations | Environments, FastAPI skeleton, single sign-on, schema, WebSocket-capable gateway, `/lab` shell, access admin page, risk spike | Done |
 | 1 Notebooks and files | Projects, file browser/upload, create/open/save `.ipynb`, Monaco cells, Markdown cells | Done |
 | 2 Execution | Runtime start/stop/restart, kernel bridge, streaming output, plots, Run/Run All/Interrupt, reconnect replay | Done |
-| 3 Workspace tools | Terminal, package install, CPU/RAM/GPU monitoring, idle shutdown, limits enforcement, audit | |
+| 3 Workspace tools | Terminal, package install, CPU/RAM/GPU monitoring, idle shutdown, limits enforcement, audit | Done |
 | 4 Assistant | MangoLab panel with read-only inspection tools, explain/fix/generate/optimize, apply/undo | |
 | 5 Hardening | uid-pool or Podman driver, revisions, sharing, systemd services, load tests | |
