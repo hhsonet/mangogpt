@@ -11,8 +11,7 @@ const attempts = new Map<string, { count: number; resetAt: number }>();
 const MAX_FAILS = 5;
 const WINDOW_MS = 60_000;
 
-const clientIp = (req: Request) =>
-  req.headers.get("cf-connecting-ip") ?? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
+const clientIp = (req: Request) => ipOf(req) ?? "local";
 
 function limited(key: string, now: number) {
   const r = attempts.get(key);

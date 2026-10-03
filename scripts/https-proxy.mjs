@@ -18,11 +18,22 @@ const LAB_PORT = Number(process.env.LAB_PORT ?? 8200);
 const isLabPath = (url = "") => url.startsWith("/lab-api/") || url === "/lab-api" || url.startsWith("/lab-ws/");
 const targetPort = (url) => (isLabPath(url) ? LAB_PORT : APP_PORT);
 
+// On the public TLS port the client address is the socket's; anything the client sent about its own address is
+// untrusted (it would let one person dodge the login/sign-up rate limits). Only the loopback port, used by a tunnel
+// that sets cf-connecting-ip itself, may pass it through.
+const stripClientIp = (proto) => proto === "https";
+
 function makeHandler(proto) {
   return (req, res) => {
     // Behind another TLS terminator (e.g. a tunnel) keep what it told us; otherwise state our own scheme.
     const forwardedProto = proto === "https" ? "https" : (req.headers["x-forwarded-proto"] ?? "http");
-    const headers = { ...req.headers, "x-forwarded-proto": forwardedProto, "x-forwarded-for": req.socket.remoteAddress ?? "" };
+    const headers = { ...req.headers, "x-forwarded-proto": forwardedProto };
+    if (stripClientIp(proto)) {
+      delete headers["cf-connecting-ip"];
+      headers["x-forwarded-for"] = req.socket.remoteAddress ?? "";
+    } else {
+      headers["x-forwarded-for"] ??= req.socket.remoteAddress ?? "";
+    }
     const upstream = http.request({ host: "127.0.0.1", port: targetPort(req.url), method: req.method, path: req.url, headers }, (up) => {
       res.writeHead(up.statusCode ?? 502, up.headers);
       up.pipe(res); // streamed, so token-by-token output is not buffered
@@ -48,7 +59,7 @@ function makeUpgrade(proto) {
       let raw = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
       for (let i = 0; i < req.rawHeaders.length; i += 2) {
         const k = req.rawHeaders[i];
-        if (/^x-forwarded-(proto|for)$/i.test(k)) continue;
+        if (/^x-forwarded-(proto|for)$/i.test(k) || (stripClientIp(proto) && /^cf-connecting-ip$/i.test(k))) continue;
         raw += `${k}: ${req.rawHeaders[i + 1]}\r\n`;
       }
       raw += `X-Forwarded-Proto: ${forwardedProto}\r\nX-Forwarded-For: ${req.socket.remoteAddress ?? ""}\r\n\r\n`;

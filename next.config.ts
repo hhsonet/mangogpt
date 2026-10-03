@@ -9,6 +9,19 @@ const config: NextConfig = {
     const lab = process.env.MANGOLAB_API_URL ?? "http://127.0.0.1:8200";
     return [{ source: "/lab-api/:path*", destination: `${lab}/lab-api/:path*` }];
   },
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "X-Frame-Options", value: "SAMEORIGIN" },
+          { key: "Referrer-Policy", value: "same-origin" },
+          { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+        ],
+      },
+    ];
+  },
   // proxy.ts sits in front of uploads; let bodies up to the upload limit through.
   experimental: { proxyClientMaxBodySize: `${Number(process.env.MAX_UPLOAD_MB ?? 25) + 2}mb` },
 };

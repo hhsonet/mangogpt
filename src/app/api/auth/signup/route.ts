@@ -12,8 +12,7 @@ const attempts = new Map<string, { count: number; resetAt: number }>();
 const MAX = 3;
 const WINDOW_MS = 60 * 60_000;
 
-const clientIp = (req: Request) =>
-  req.headers.get("cf-connecting-ip") ?? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
+const clientIp = (req: Request) => ipOf(req) ?? "local";
 
 export async function POST(req: Request) {
   if (!authEnabled()) return NextResponse.json({ code: "bad_request", message: "Accounts are disabled on this server." }, { status: 400 });
